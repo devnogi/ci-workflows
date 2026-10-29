@@ -8,22 +8,27 @@ const {spawnSync} = require('node:child_process');
 
 const ci = fs.readFileSync('.github/workflows/spring-ci.yml', 'utf8');
 const production = fs.readFileSync('.github/workflows/spring-prod.yml', 'utf8');
+const nodeCi = fs.readFileSync('.github/workflows/node-ci.yml', 'utf8');
+const nodeProduction = fs.readFileSync('.github/workflows/node-prod.yml', 'utf8');
 const deployment = fs.readFileSync('.github/workflows/compose-deploy.yml', 'utf8');
 
 test('all approved profiles and mandatory integration tests are present', () => {
-  for (const item of ['base|auth-mysql|community-redis|batch', 'mysql:8.0.42', 'redis:7.4.9', 'redisIntegrationTest', 'RefreshTokenMigrationMySqlTest', 'MainHistoryCompatibilityMySqlTest', 'NicknameMigrationMySqlTest', 'NicknameConcurrencyMySqlTest', 'UserVerificationConcurrencyMySqlTest', 'OAuthExchangeMySqlTest', 'SocialSignupProofMySqlTest', 'RefreshTokenRotationMySqlTest', 'RefreshTokenLengthMySqlTest', 'ConcurrentLoginMySqlTest', 'UserVerificationFailureHistoryMySqlTest', 'LoginLockoutMySqlTest']) assert.ok(ci.includes(item), item);
+  for (const item of ['gateway:base|auth:auth-mysql|community:community-redis|batch:batch', 'mysql:8.0.42', 'redis:7.4.9', 'redisIntegrationTest', 'RefreshTokenMigrationMySqlTest', 'MainHistoryCompatibilityMySqlTest', 'NicknameMigrationMySqlTest', 'NicknameConcurrencyMySqlTest', 'UserVerificationConcurrencyMySqlTest', 'OAuthExchangeMySqlTest', 'SocialSignupProofMySqlTest', 'RefreshTokenRotationMySqlTest', 'RefreshTokenLengthMySqlTest', 'ConcurrentLoginMySqlTest', 'UserVerificationFailureHistoryMySqlTest', 'LoginLockoutMySqlTest']) assert.ok(ci.includes(item), item);
 });
 
 test('external actions are pinned and PR builds never push', () => {
-  for (const workflow of [ci, production, deployment]) for (const match of workflow.matchAll(/uses:\s*([^\s]+)/g)) assert.match(match[1], /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/);
-  assert.match(ci, /docker build --file/);
-  assert.doesNotMatch(ci, /docker push|buildx build --push/);
-  assert.doesNotMatch(ci, /image:\s*\$\{\{/);
+  for (const workflow of [ci, production, nodeCi, nodeProduction, deployment]) for (const match of workflow.matchAll(/uses:\s*([^\s]+)/g)) assert.match(match[1], /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/);
+  for (const workflow of [ci, nodeCi]) {
+    assert.match(workflow, /docker build --file/);
+    assert.doesNotMatch(workflow, /docker push|buildx build --push/);
+    assert.doesNotMatch(workflow, /image:\s*\$\{\{/);
+  }
 });
 
-test('publish is serialized by caller, image, and resolved version', () => {
+test('publish is serialized by caller, service, and resolved version', () => {
   assert.match(production, /release-version:\n[\s\S]*?gradle\('\.\/gradlew', \['properties', '-q'\]/);
-  assert.match(production, /group: publish-\$\{\{ github\.repository \}\}-\$\{\{ inputs\.image-name \}\}-\$\{\{ needs\.release-version\.outputs\.version \}\}/);
+  assert.match(nodeProduction, /release-version:\n[\s\S]*?resolveNpmVersion/);
+  for (const workflow of [production, nodeProduction]) assert.match(workflow, /group: publish-\$\{\{ github\.repository \}\}-\$\{\{ inputs\.service-name \}\}-\$\{\{ needs\.release-version\.outputs\.version \}\}/);
   assert.match(production, /cancel-in-progress: false/);
   assert.match(production, /needs: \[preflight, release-version, validate, auth-mysql, verify, community-redis, secret-scan, container\]/);
 });
@@ -35,17 +40,20 @@ test('preflight has no production environment or secret references', () => {
 });
 
 test('production uses Buildx metadata, immutable-tag checks, and same-run digest deployment', () => {
-  assert.match(production, /'buildx', 'build', '--push'/);
-  assert.match(production, /org\.opencontainers\.image\.revision/);
-  assert.match(production, /containerimage\.digest/);
-  assert.match(production, /immutable_tags_settings/);
-  assert.match(production, /needs\.publish\.outputs\.digest/);
-  assert.doesNotMatch(production, /uses: \.\//);
+  for (const workflow of [production, nodeProduction]) {
+    assert.match(workflow, /'buildx', 'build', '--push'/);
+    assert.match(workflow, /org\.opencontainers\.image\.revision/);
+    assert.match(workflow, /containerimage\.digest/);
+    assert.match(workflow, /immutable_tags_settings/);
+    assert.match(workflow, /format\('\{0\}@\{1\}', vars\.DOCKERHUB_REPOSITORY, needs\.publish\.outputs\.digest\)/);
+    assert.doesNotMatch(workflow, /uses: \.\//);
+  }
 });
 
 test('publish receives every required deployment secret before registry access', () => {
   const publish = production.slice(production.indexOf('  publish:'), production.indexOf('  deploy:'));
-  assert.match(publish, /DOCKERHUB_NAMESPACE: \$\{\{ vars\.DOCKERHUB_NAMESPACE \}\}/);
+  assert.match(publish, /DOCKERHUB_USERNAME: \$\{\{ vars\.DOCKERHUB_USERNAME \}\}/);
+  assert.match(publish, /DOCKERHUB_REPOSITORY: \$\{\{ vars\.DOCKERHUB_REPOSITORY \}\}/);
   for (const name of ['DOCKERHUB_PUSH_TOKEN', 'PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE']) {
     assert.match(publish, new RegExp(`${name}: \\$\\{\\{ secrets\\.${name} \\}\\}`));
   }
@@ -67,9 +75,32 @@ test('validation checks out the caller and main PRs reject an existing productio
   const validate = ci.match(/  validate:[\s\S]*?\n  version-policy:/)?.[0] || '';
   assert.match(validate, /actions\/checkout@[0-9a-f]{40}/);
   assert.match(ci, /github\.event_name == 'pull_request' && github\.base_ref == 'main'/);
-  assert.match(ci, /vars\.DOCKERHUB_NAMESPACE/);
-  assert.match(ci, /prod-v\$\{version\} already exists/);
+  assert.match(ci, /vars\.DOCKERHUB_REPOSITORY/);
+  assert.match(ci, /throw Error\(`\$\{tag\} already exists/);
   assert.match(ci, /increment the Gradle version/);
+});
+
+test('Node workflow is typed for React and runs the repository quality gates', () => {
+  assert.match(nodeCi, /SERVICE_NAME: \$\{\{ inputs\.service-name \}\}/);
+  assert.match(nodeCi, /\[\[ \$SERVICE_NAME == react \]\]/);
+  assert.match(nodeCi, /npm ci/);
+  assert.match(nodeCi, /npm run verify/);
+  assert.match(nodeCi, /scripts\/secret-scan\.mjs/);
+  assert.match(nodeCi, /filter\(x=>!x\[2\]\.startsWith\(":-"\)\)/);
+});
+
+test('GitHub Release is created only after successful digest deployment', () => {
+  for (const workflow of [production, nodeProduction]) {
+    const releaseJob = workflow.slice(workflow.indexOf('  release:'));
+    assert.match(releaseJob, /needs: \[publish, deploy\]/);
+    assert.match(releaseJob, /permissions:\n\s+contents: write/);
+    assert.match(releaseJob, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
+    assert.match(releaseJob, /node - github-release/);
+    assert.match(releaseJob, /IMAGE_DIGEST: \$\{\{ needs\.publish\.outputs\.digest \}\}/);
+  }
+  assert.match(production, /Object\.keys\(serviceProfiles\)\.map/);
+  for (const service of ['gateway', 'batch', 'community', 'auth', 'react']) assert.match(production, new RegExp(`\\n\\s+${service}:`));
+  assert.doesNotMatch(production, /prod-v|sha-\$\{sha\}/);
 });
 
 function extractValidationSnippet() {
@@ -101,10 +132,10 @@ test('actual CI validation shell fails closed for bad values and missing files',
     fs.writeFileSync(path.join(directory, 'compose.yml'), 'services: {}\n');
     const run = (overrides = {}) => spawnSync(bash, ['-c', extractValidationSnippet()], {
       cwd: directory, encoding: 'utf8',
-      env: {...process.env, PROFILE: 'base', COMPOSE_FILE: 'compose.yml', DOCKERFILE: 'Dockerfile', IMAGE_NAME: 'service', ...overrides},
+      env: {...process.env, PROFILE: 'base', COMPOSE_FILE: 'compose.yml', DOCKERFILE: 'Dockerfile', SERVICE_NAME: 'gateway', ...overrides},
     });
     assert.equal(run().status, 0);
-    for (const invalid of [{PROFILE: 'other'}, {COMPOSE_FILE: '../compose.yml'}, {DOCKERFILE: 'missing'}, {IMAGE_NAME: 'Bad/Image'}]) assert.notEqual(run(invalid).status, 0);
+    for (const invalid of [{PROFILE: 'other'}, {COMPOSE_FILE: '../compose.yml'}, {DOCKERFILE: 'missing'}, {SERVICE_NAME: 'react'}]) assert.notEqual(run(invalid).status, 0);
   } finally { fs.rmSync(directory, {recursive: true, force: true}); }
 });
 

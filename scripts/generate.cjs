@@ -3,7 +3,8 @@
 const fs = require('node:fs');
 const read = (path) => fs.readFileSync(path, 'utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').trimEnd();
 const indent = (source, count) => source.split('\n').map((line) => line ? `${' '.repeat(count)}${line}` : '').join('\n');
-const inputs = ['service-profile', 'image-name', 'dockerfile', 'compose-file', 'health-timeout', 'platform'];
+const springInputs = ['service-profile', 'service-name', 'dockerfile', 'compose-file', 'health-timeout', 'platform'];
+const nodeInputs = ['service-name', 'dockerfile', 'compose-file', 'health-timeout', 'platform'];
 const deployInputs = ['compose-file', 'health-timeout', 'image-ref'];
 const secrets = ['DOCKERHUB_PUSH_TOKEN', 'PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE'];
 const deploySecrets = ['PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE'];
@@ -23,13 +24,14 @@ const release = read('scripts/release.cjs');
 const remote = read('scripts/deploy-remote.sh');
 const local = read('scripts/deploy-local.sh');
 const nodeRun = (mode) => `node - ${mode} <<'RELEASE_SCRIPT'\n${release}\nRELEASE_SCRIPT`;
+const fixedProfile = (kind) => kind === 'node' ? '          SERVICE_PROFILE: react\n' : '';
 
 const deployJob = (integrated) => `  deploy:
 ${integrated ? '    needs: publish\n' : ''}    runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
     concurrency:
-      group: production-\${{ github.repository }}-${integrated ? '${{ inputs.image-name }}' : 'compose-deploy'}
+      group: production-\${{ github.repository }}-${integrated ? '${{ inputs.service-name }}' : 'compose-deploy'}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -37,7 +39,7 @@ ${integrated ? '    needs: publish\n' : ''}    runs-on: ubuntu-latest
         env:
 ${inputEnvironment(deployInputs.filter((name) => name !== 'image-ref'))}
 ${variableEnvironment()}
-          IMAGE_REF: ${integrated ? "${{ format('{0}/{1}@{2}', vars.DOCKERHUB_NAMESPACE, inputs.image-name, needs.publish.outputs.digest) }}" : '${{ inputs.image-ref }}'}
+          IMAGE_REF: ${integrated ? "${{ format('{0}@{1}', vars.DOCKERHUB_REPOSITORY, needs.publish.outputs.digest) }}" : '${{ inputs.image-ref }}'}
 ${secretEnvironment(deploySecrets)}
         run: |
           REMOTE_SCRIPT="$RUNNER_TEMP/deploy-remote.sh"
@@ -50,9 +52,29 @@ ${indent(local, 10)}
           DEPLOY_SCRIPT_EOF
 `;
 
-const ci = read('.github/workflows/spring-ci.yml');
-const ciJobs = ci.slice(ci.indexOf('\njobs:\n') + 7);
-const production = `name: Spring production
+const releaseJob = (inputs, kind) => `  release:
+    needs: [publish, deploy]
+    if: \${{ needs.publish.result == 'success' && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create or verify GitHub Release
+        env:
+${inputEnvironment(inputs)}
+${fixedProfile(kind)}          RELEASE_VERSION: \${{ needs.publish.outputs.version }}
+          IMAGE_DIGEST: \${{ needs.publish.outputs.digest }}
+          DOCKERHUB_REPOSITORY: \${{ vars.DOCKERHUB_REPOSITORY }}
+          GITHUB_TOKEN: \${{ github.token }}
+        run: |
+${indent(nodeRun('github-release'), 10)}
+`;
+
+const workflow = ({name, kind, inputs, ciPath, resolveSteps, ciNeeds, publishIf}) => {
+  const ci = read(ciPath);
+  const ciJobs = ci.slice(ci.indexOf('\njobs:\n') + 7);
+  return `name: ${name}
 on:
   workflow_call:
     inputs:
@@ -64,6 +86,8 @@ ${secretDefinitions(secrets)}
         value: \${{ jobs.publish.outputs.version }}
       digest:
         value: \${{ jobs.publish.outputs.digest }}
+      tag:
+        value: \${{ jobs.publish.outputs.tag }}
 permissions:
   contents: read
 jobs:
@@ -73,7 +97,7 @@ jobs:
       - name: Validate production request
         env:
 ${inputEnvironment(inputs)}
-        run: |
+${fixedProfile(kind)}        run: |
 ${indent(nodeRun('validate-inputs'), 10)}
   release-version:
     needs: preflight
@@ -81,7 +105,43 @@ ${indent(nodeRun('validate-inputs'), 10)}
     outputs:
       version: \${{ steps.version.outputs.version }}
     steps:
+${resolveSteps}
+${ciJobs}
+  publish:
+    needs: [preflight, release-version, ${ciNeeds.join(', ')}]
+    if: \${{ ${publishIf} }}
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 45
+    concurrency:
+      group: publish-\${{ github.repository }}-\${{ inputs.service-name }}-\${{ needs.release-version.outputs.version }}
+      cancel-in-progress: false
+    outputs:
+      version: \${{ steps.publish.outputs.version }}
+      digest: \${{ steps.publish.outputs.digest }}
+      tag: \${{ steps.publish.outputs.tag }}
+    steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Publish immutable image
+        id: publish
+        env:
+${inputEnvironment(inputs)}
+${fixedProfile(kind)}          RELEASE_VERSION: \${{ needs.release-version.outputs.version }}
+          DOCKERHUB_USERNAME: \${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_REPOSITORY: \${{ vars.DOCKERHUB_REPOSITORY }}
+${variableEnvironment()}
+${secretEnvironment(secrets)}
+        run: |
+${indent(nodeRun('publish'), 10)}
+${deployJob(true)}${releaseJob(inputs, kind)}`;
+};
+
+const spring = workflow({
+  name: 'Spring production',
+  kind: 'spring',
+  inputs: springInputs,
+  ciPath: '.github/workflows/spring-ci.yml',
+  resolveSteps: `      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
           distribution: temurin
@@ -91,33 +151,28 @@ ${indent(nodeRun('validate-inputs'), 10)}
       - name: Resolve release version
         id: version
         run: |
-${indent(nodeRun('resolve-version'), 10)}
-${ciJobs}
-  publish:
-    needs: [preflight, release-version, validate, auth-mysql, verify, community-redis, secret-scan, container]
-    if: \${{ always() && needs.preflight.result == 'success' && needs.release-version.result == 'success' && needs.validate.result == 'success' && needs.secret-scan.result == 'success' && needs.container.result == 'success' && ((inputs.service-profile == 'auth-mysql' && needs.auth-mysql.result == 'success') || (inputs.service-profile == 'community-redis' && needs.community-redis.result == 'success') || ((inputs.service-profile == 'base' || inputs.service-profile == 'batch') && needs.verify.result == 'success')) }}
-    runs-on: ubuntu-latest
-    environment: production
-    timeout-minutes: 45
-    concurrency:
-      group: publish-\${{ github.repository }}-\${{ inputs.image-name }}-\${{ needs.release-version.outputs.version }}
-      cancel-in-progress: false
-    outputs:
-      version: \${{ steps.publish.outputs.version }}
-      digest: \${{ steps.publish.outputs.digest }}
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Publish immutable image
-        id: publish
-        env:
-${inputEnvironment(inputs)}
-          RELEASE_VERSION: \${{ needs.release-version.outputs.version }}
-          DOCKERHUB_NAMESPACE: \${{ vars.DOCKERHUB_NAMESPACE }}
-${variableEnvironment()}
-${secretEnvironment(secrets)}
+${indent(nodeRun('resolve-gradle-version'), 10)}`,
+  ciNeeds: ['validate', 'auth-mysql', 'verify', 'community-redis', 'secret-scan', 'container'],
+  publishIf: "always() && needs.preflight.result == 'success' && needs.release-version.result == 'success' && needs.validate.result == 'success' && needs.secret-scan.result == 'success' && needs.container.result == 'success' && ((inputs.service-profile == 'auth-mysql' && needs.auth-mysql.result == 'success') || (inputs.service-profile == 'community-redis' && needs.community-redis.result == 'success') || ((inputs.service-profile == 'base' || inputs.service-profile == 'batch') && needs.verify.result == 'success'))",
+});
+
+const node = workflow({
+  name: 'Node production',
+  kind: 'node',
+  inputs: nodeInputs,
+  ciPath: '.github/workflows/node-ci.yml',
+  resolveSteps: `      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Resolve release version
+        id: version
         run: |
-${indent(nodeRun('publish'), 10)}
-${deployJob(true)}`;
+${indent(nodeRun('resolve-npm-version'), 10)}`,
+  ciNeeds: ['validate', 'verify', 'container'],
+  publishIf: "always() && needs.preflight.result == 'success' && needs.release-version.result == 'success' && needs.validate.result == 'success' && needs.verify.result == 'success' && needs.container.result == 'success'",
+});
 
 const deployment = `name: Deploy immutable Compose service
 on:
@@ -132,7 +187,8 @@ jobs:
 ${deployJob(false)}`;
 
 const files = {
-  '.github/workflows/spring-prod.yml': production,
+  '.github/workflows/spring-prod.yml': spring,
+  '.github/workflows/node-prod.yml': node,
   '.github/workflows/compose-deploy.yml': deployment,
 };
 let invalid = false;

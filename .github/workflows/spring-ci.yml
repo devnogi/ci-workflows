@@ -5,7 +5,7 @@ on:
       service-profile:
         required: true
         type: string
-      image-name:
+      service-name:
         required: true
         type: string
       dockerfile:
@@ -26,16 +26,15 @@ jobs:
           PROFILE: ${{ inputs.service-profile }}
           COMPOSE_FILE: ${{ inputs.compose-file }}
           DOCKERFILE: ${{ inputs.dockerfile }}
-          IMAGE_NAME: ${{ inputs.image-name }}
+          SERVICE_NAME: ${{ inputs.service-name }}
         run: |
           set -Eeuo pipefail
-          case "$PROFILE" in
-            base|auth-mysql|community-redis|batch) ;;
-            *) echo 'Invalid service profile'; exit 1 ;;
+          case "$SERVICE_NAME:$PROFILE" in
+            gateway:base|auth:auth-mysql|community:community-redis|batch:batch) ;;
+            *) echo 'Invalid service profile mapping'; exit 1 ;;
           esac
           [[ $COMPOSE_FILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$ && $COMPOSE_FILE != *..* ]] || { echo 'Invalid Compose path'; exit 1; }
           [[ $DOCKERFILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*$ && $DOCKERFILE != *..* ]] || { echo 'Invalid Dockerfile path'; exit 1; }
-          [[ $IMAGE_NAME =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]] || { echo 'Invalid image name'; exit 1; }
           [[ -f $COMPOSE_FILE ]] || { echo 'Compose file does not exist'; exit 1; }
           [[ -f $DOCKERFILE ]] || { echo 'Dockerfile does not exist'; exit 1; }
   version-policy:
@@ -51,20 +50,23 @@ jobs:
           cache: gradle
       - name: Require an unused production version
         env:
-          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
-          IMAGE_NAME: ${{ inputs.image-name }}
+          DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
+          SERVICE_NAME: ${{ inputs.service-name }}
         run: |
           node <<'NODE'
           'use strict';
           const {execFileSync} = require('node:child_process');
           const required = (name) => {
             const value = process.env[name];
-            if (!value || !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(value)) throw Error(`Invalid ${name}`);
+            if (!value) throw Error(`Missing ${name}`);
             return value;
           };
           (async () => {
-            const namespace = required('DOCKERHUB_NAMESPACE');
-            const repository = required('IMAGE_NAME');
+            const image = required('DOCKERHUB_REPOSITORY');
+            if (image !== 'devanted/memonogi') throw Error('Invalid Docker Hub repository');
+            const [namespace, repository] = image.split('/');
+            const service = required('SERVICE_NAME');
+            if (!['gateway', 'batch', 'community', 'auth'].includes(service)) throw Error('Invalid service name');
             const output = execFileSync('./gradlew', ['properties', '-q'], {encoding: 'utf8'});
             const matches = [...output.matchAll(/^version:\s*(.+)$/gm)];
             if (matches.length !== 1) throw Error('Cannot resolve root Gradle version');
@@ -75,10 +77,11 @@ jobs:
             if (!repositoryResponse.ok) throw Error(`Docker Hub repository lookup failed (${repositoryResponse.status})`);
             const info = await repositoryResponse.json();
             if (info.is_private !== false) throw Error('Public Docker Hub repository required');
-            const tagResponse = await fetch(`${base}/tags/prod-v${version}`, {signal: AbortSignal.timeout(30000)});
+            const tag = `${service}-v${version}`;
+            const tagResponse = await fetch(`${base}/tags/${tag}`, {signal: AbortSignal.timeout(30000)});
             if (tagResponse.status === 404) return;
             if (!tagResponse.ok) throw Error(`Docker Hub tag lookup failed (${tagResponse.status})`);
-            throw Error(`prod-v${version} already exists; increment the Gradle version before merging`);
+            throw Error(`${tag} already exists; increment the Gradle version before merging`);
           })().catch((error) => {
             console.error(error.message);
             process.exitCode = 1;

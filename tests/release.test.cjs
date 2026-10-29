@@ -12,12 +12,14 @@ const sha = 'a'.repeat(40);
 const digest = `sha256:${'b'.repeat(64)}`;
 const env = {
   GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'push', GITHUB_SHA: sha,
-  GITHUB_SERVER_URL: 'https://github.com', GITHUB_REPOSITORY: 'devnogi/service',
-  SERVICE_PROFILE: 'base', COMPOSE_FILE: 'compose.yml', DOCKERFILE: 'Dockerfile', IMAGE_NAME: 'service',
+  GITHUB_SERVER_URL: 'https://github.com', GITHUB_API_URL: 'https://api.github.com', GITHUB_REPOSITORY: 'devnogi/devnogi-gateway-server',
+  GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'github-token',
+  SERVICE_NAME: 'gateway', SERVICE_PROFILE: 'base', COMPOSE_FILE: 'compose.yml', DOCKERFILE: 'Dockerfile',
   COMPOSE_SERVICE: 'app', CONTAINER_NAME: 'app-prod', REMOTE_DIR: '/srv/app',
   HEALTH_URL: 'http://127.0.0.1:8080/actuator/health', HEALTH_TIMEOUT: '60', PLATFORM: 'linux/amd64',
   PROD_COMPOSE_FILE: 'docker-compose-prod.yml',
-  RELEASE_VERSION: '1.2.3', DOCKERHUB_NAMESPACE: 'example', DOCKERHUB_PUSH_TOKEN: 'secret',
+  RELEASE_VERSION: '1.2.3', IMAGE_DIGEST: digest, DOCKERHUB_USERNAME: 'devanted',
+  DOCKERHUB_REPOSITORY: 'devanted/memonogi', DOCKERHUB_PUSH_TOKEN: 'secret',
   PROD_HOST: 'server.example', PROD_USER: 'deployer', PROD_SSH_PORT: '22',
   PROD_SSH_PRIVATE_KEY: 'private-key', PROD_KNOWN_HOSTS: 'known-host', PROD_ENV_FILE: 'SETTING=value',
 };
@@ -27,7 +29,7 @@ test('public production inputs validate without accessing production secrets', (
   assert.doesNotThrow(() => release.validateInputs({...env, GITHUB_EVENT_NAME: 'workflow_dispatch'}));
   for (const patch of [
     {GITHUB_EVENT_NAME: 'pull_request'}, {GITHUB_REF: 'refs/heads/dev'}, {GITHUB_SHA: 'abc'},
-    {SERVICE_PROFILE: 'other'}, {COMPOSE_FILE: '../x.yml'}, {DOCKERFILE: '../Dockerfile'},
+    {SERVICE_PROFILE: 'other'}, {SERVICE_NAME: 'react'}, {GITHUB_REPOSITORY: 'devnogi/unexpected'}, {COMPOSE_FILE: '../x.yml'}, {DOCKERFILE: '../Dockerfile'},
     {HEALTH_TIMEOUT: '601'}, {PLATFORM: 'linux/arm64'},
   ]) assert.throws(() => release.validateInputs({...env, ...patch}));
   assert.doesNotThrow(() => release.validateInputs({...env, DOCKERHUB_PUSH_TOKEN: '', PROD_SSH_PRIVATE_KEY: ''}));
@@ -42,38 +44,46 @@ test('public production inputs validate without accessing production secrets', (
   }
 });
 
-test('Gradle properties is the only release version source', () => {
+test('Gradle and npm metadata are the only typed release version sources', () => {
   let call;
   let output = '';
-  const result = release.resolveVersion({GITHUB_OUTPUT: 'output'}, {
+  const result = release.resolveGradleVersion({GITHUB_OUTPUT: 'output'}, {
     execFileSync(file, args) { call = [file, ...args]; return 'name: service\nversion: 2.4.6-SNAPSHOT\n'; },
     fs: {appendFileSync(_path, value) { output += value; }},
   });
   assert.equal(result, '2.4.6');
   assert.deepEqual(call, ['./gradlew', 'properties', '-q']);
   assert.equal(output, 'version=2.4.6\n');
-  assert.throws(() => release.resolveVersion({GITHUB_OUTPUT: 'output'}, {
+  assert.throws(() => release.resolveGradleVersion({GITHUB_OUTPUT: 'output'}, {
     execFileSync() { return 'version: invalid\n'; }, fs: {appendFileSync() {}},
+  }));
+  output = '';
+  assert.equal(release.resolveNpmVersion({GITHUB_OUTPUT: 'output'}, {
+    fs: {readFileSync() { return JSON.stringify({version: '3.2.1'}); }, appendFileSync(_path, value) { output += value; }},
+  }), '3.2.1');
+  assert.equal(output, 'version=3.2.1\n');
+  assert.throws(() => release.resolveNpmVersion({GITHUB_OUTPUT: 'output'}, {
+    fs: {readFileSync() { return JSON.stringify({version: '3.2.1-SNAPSHOT'}); }, appendFileSync() {}},
   }));
 });
 
 test('version, collision, and immutable-tag requirements fail closed', () => {
   assert.equal(release.version('1.2.3-SNAPSHOT'), '1.2.3');
   for (const value of ['01.2.3', '1.2', '1.2.3-rc1', 'v1.2.3']) assert.throws(() => release.version(value));
-  assert.equal(release.collision(null, null), 'build');
-  assert.equal(release.collision(digest, digest), 'reuse');
-  for (const args of [[digest, null], [null, digest], [digest, `sha256:${'c'.repeat(64)}`], ['bad', 'bad']]) assert.throws(() => release.collision(...args));
-  const tags = ['prod-v1.2.3', `sha-${sha}`];
-  const exactRules = ['^prod-v[0-9]+\\.[0-9]+\\.[0-9]+$', '^sha-[0-9a-f]{40}$'];
+  assert.equal(release.collision(null), 'build');
+  assert.equal(release.collision(digest), 'verify-reuse');
+  assert.throws(() => release.collision('bad'));
+  const tags = ['gateway-v1.2.3'];
+  const exactRules = ['gateway', 'batch', 'community', 'auth', 'react'].map((service) => `^${service}-v[0-9]+\\.[0-9]+\\.[0-9]+$`);
   assert.doesNotThrow(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: exactRules}}, tags));
   assert.doesNotThrow(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: ['^.*$']}}, tags));
   assert.doesNotThrow(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: []}}, tags));
-  assert.throws(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: ['^prod-v[09]', '^sha-[0f]']}}, tags));
-  assert.throws(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: ['^prod-v.*$', '^sh\\a-.*$']}}, tags));
+  assert.throws(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: exactRules.slice(0, 4)}}, tags));
+  assert.throws(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: ['^gateway-v.*$']}}, tags));
   for (const info of [
     {is_private: true, immutable_tags_settings: {enabled: true, rules: []}},
-    {is_private: false, immutable_tags_settings: {enabled: false, rules: ['prod-v.*', 'sha-.*']}},
-    {is_private: false, immutable_tags_settings: {enabled: true, rules: ['prod-v.*']}},
+    {is_private: false, immutable_tags_settings: {enabled: false, rules: exactRules}},
+    {is_private: false, immutable_tags_settings: {enabled: true, rules: ['gateway-v.*']}},
   ]) assert.throws(() => release.immutableTagsRequired(info, tags));
 });
 
@@ -85,9 +95,17 @@ test('publication uses one Buildx push, OCI labels, metadata digest, and registr
     fs: {appendFileSync(_path, value) { outputs += value; }, readFileSync() { return JSON.stringify({'containerimage.digest': digest}); }},
     spawnSync() { return {status: 0}; },
     cmd(_name, args) { calls.push(args); published = true; },
+    capture(_name, args) {
+      const format = args[3];
+      if (format.includes('revision')) return sha;
+      if (format.includes('version')) return '1.2.3';
+      if (format.includes('source')) return 'https://github.com/devnogi/devnogi-gateway-server';
+      if (format.includes('RepoDigests')) return JSON.stringify([`devanted/memonogi@${digest}`]);
+      throw Error('unexpected capture');
+    },
     fetch: async (url) => {
       if (url.endsWith('/auth/token')) return {ok: true, json: async () => ({access_token: 'token'})};
-      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: false, immutable_tags_settings: {enabled: true, rules: ['^prod-v[0-9]+\\.[0-9]+\\.[0-9]+$', '^sha-[0-9a-f]{40}$']}})};
+      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: false, immutable_tags_settings: {enabled: true, rules: []}})};
       return published ? {ok: true, json: async () => ({digest})} : {ok: false, status: 404};
     },
   };
@@ -97,15 +115,57 @@ test('publication uses one Buildx push, OCI labels, metadata digest, and registr
   assert.deepEqual(args.slice(0, 3), ['buildx', 'build', '--push']);
   assert.ok(args.includes('--metadata-file'));
   assert.ok(args.includes(`org.opencontainers.image.revision=${sha}`));
-  assert.ok(args.includes('org.opencontainers.image.source=https://github.com/devnogi/service'));
+  assert.ok(args.includes('org.opencontainers.image.source=https://github.com/devnogi/devnogi-gateway-server'));
   assert.ok(args.includes('org.opencontainers.image.version=1.2.3'));
-  assert.ok(args.includes('example/service:prod-v1.2.3'));
-  assert.ok(args.includes(`example/service:sha-${sha}`));
+  assert.ok(args.includes('devanted/memonogi:gateway-v1.2.3'));
+  assert.equal(args.filter((value) => value === '--tag').length, 1);
   assert.match(outputs, new RegExp(`digest=${digest}`));
+  assert.match(outputs, /tag=gateway-v1\.2\.3/);
   calls = [];
   published = true;
   await release.publish({...env, RUNNER_TEMP: 'temp', GITHUB_OUTPUT: 'output', GITHUB_STEP_SUMMARY: 'summary'}, dependencies);
-  assert.deepEqual(calls, []);
+  assert.equal(calls.some((call) => call[0] === 'buildx'), false);
+  assert.deepEqual(calls[0], ['pull', 'devanted/memonogi:gateway-v1.2.3']);
+});
+
+test('existing immutable tag is reusable only for the same commit and version labels', async () => {
+  const dependencies = {
+    fs: {appendFileSync() {}}, spawnSync() { return {status: 0}; }, cmd() {},
+    capture(_name, args) {
+      const format = args[3];
+      if (format.includes('revision')) return 'f'.repeat(40);
+      if (format.includes('version')) return '1.2.3';
+      if (format.includes('source')) return 'https://github.com/devnogi/devnogi-gateway-server';
+      if (format.includes('RepoDigests')) return JSON.stringify([`devanted/memonogi@${digest}`]);
+      throw Error('unexpected capture');
+    },
+    fetch: async (url) => {
+      if (url.endsWith('/auth/token')) return {ok: true, json: async () => ({access_token: 'token'})};
+      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: false, immutable_tags_settings: {enabled: true, rules: []}})};
+      return {ok: true, json: async () => ({digest})};
+    },
+  };
+  await assert.rejects(release.publish({...env, RUNNER_TEMP: 'temp', GITHUB_OUTPUT: 'output', GITHUB_STEP_SUMMARY: 'summary'}, dependencies), /does not match/);
+});
+
+test('existing immutable tag is not reusable when its OCI source is another repository', async () => {
+  const dependencies = {
+    fs: {appendFileSync() {}}, spawnSync() { return {status: 0}; }, cmd() {},
+    capture(_name, args) {
+      const format = args[3];
+      if (format.includes('revision')) return sha;
+      if (format.includes('version')) return '1.2.3';
+      if (format.includes('source')) return 'https://github.com/devnogi/other-repository';
+      if (format.includes('RepoDigests')) return JSON.stringify([`devanted/memonogi@${digest}`]);
+      throw Error('unexpected capture');
+    },
+    fetch: async (url) => {
+      if (url.endsWith('/auth/token')) return {ok: true, json: async () => ({access_token: 'token'})};
+      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: false, immutable_tags_settings: {enabled: true, rules: []}})};
+      return {ok: true, json: async () => ({digest})};
+    },
+  };
+  await assert.rejects(release.publish({...env, RUNNER_TEMP: 'temp', GITHUB_OUTPUT: 'output', GITHUB_STEP_SUMMARY: 'summary'}, dependencies), /does not match/);
 });
 
 test('registry digest mismatch rejects the published result', async () => {
@@ -120,6 +180,57 @@ test('registry digest mismatch rejects the published result', async () => {
     },
   };
   await assert.rejects(release.publish({...env, RUNNER_TEMP: 'temp', GITHUB_OUTPUT: 'output', GITHUB_STEP_SUMMARY: 'summary'}, dependencies), /does not match/);
+});
+
+function response(status, value) {
+  return {status, ok: status >= 200 && status < 300, json: async () => value};
+}
+
+test('GitHub Release is created after deployment metadata and exact retries do not mutate it', async () => {
+  const tag = 'gateway-v1.2.3';
+  const body = release.releaseBody(env);
+  let created = false;
+  let posts = 0;
+  let summary = '';
+  const existing = {tag_name: tag, name: tag, body, draft: false, prerelease: false, html_url: `https://github.com/devnogi/devnogi-gateway-server/releases/tag/${tag}`};
+  const fetch = async (url, options = {}) => {
+    if (url.endsWith(`/releases/tags/${tag}`)) return created ? response(200, existing) : response(404, {});
+    if (url.endsWith(`/git/ref/tags/${tag}`)) return created ? response(200, {object: {type: 'commit', sha}}) : response(404, {});
+    if (url.endsWith('/releases') && options.method === 'POST') {
+      posts += 1;
+      const payload = JSON.parse(options.body);
+      assert.equal(payload.tag_name, tag);
+      assert.equal(payload.target_commitish, sha);
+      assert.equal(payload.body, body);
+      created = true;
+      return response(201, existing);
+    }
+    throw Error(`unexpected request ${url}`);
+  };
+  const deps = {fetch, fs: {appendFileSync(_path, value) { summary += value; }}};
+  await release.githubRelease({...env, GITHUB_STEP_SUMMARY: 'summary'}, deps);
+  await release.githubRelease({...env, GITHUB_RUN_ID: '99', GITHUB_RUN_ATTEMPT: '3', GITHUB_STEP_SUMMARY: 'summary'}, deps);
+  assert.equal(posts, 1);
+  assert.match(summary, /releases\/tag\/gateway-v1\.2\.3/);
+});
+
+test('GitHub Release refuses tag, commit, digest, and metadata mismatches without mutation', async () => {
+  const tag = 'gateway-v1.2.3';
+  const exact = {tag_name: tag, name: tag, body: release.releaseBody(env), draft: false, prerelease: false, html_url: 'release'};
+  let posts = 0;
+  const run = (existing, commit = sha) => release.githubRelease({...env, GITHUB_STEP_SUMMARY: 'summary'}, {
+    fs: {appendFileSync() {}},
+    fetch: async (url, options = {}) => {
+      if (url.endsWith(`/releases/tags/${tag}`)) return response(200, existing);
+      if (url.endsWith(`/git/ref/tags/${tag}`)) return response(200, {object: {type: 'commit', sha: commit}});
+      if (options.method === 'POST') posts += 1;
+      throw Error(`unexpected request ${url}`);
+    },
+  });
+  await assert.rejects(run(exact, 'f'.repeat(40)), /different commit/);
+  await assert.rejects(run({...exact, body: exact.body.replace(digest, `sha256:${'c'.repeat(64)}`)}), /does not match/);
+  await assert.rejects(run({...exact, draft: true}), /does not match/);
+  assert.equal(posts, 0);
 });
 
 test('invalid deployment secrets stop publication before registry access', async () => {
