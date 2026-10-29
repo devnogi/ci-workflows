@@ -16,6 +16,7 @@ const env = {
   SERVICE_PROFILE: 'base', COMPOSE_FILE: 'compose.yml', DOCKERFILE: 'Dockerfile', IMAGE_NAME: 'service',
   COMPOSE_SERVICE: 'app', CONTAINER_NAME: 'app-prod', REMOTE_DIR: '/srv/app',
   HEALTH_URL: 'http://127.0.0.1:8080/actuator/health', HEALTH_TIMEOUT: '60', PLATFORM: 'linux/amd64',
+  PROD_COMPOSE_FILE: 'docker-compose-prod.yml',
   RELEASE_VERSION: '1.2.3', DOCKERHUB_NAMESPACE: 'example', DOCKERHUB_PUSH_TOKEN: 'secret',
   PROD_HOST: 'server.example', PROD_USER: 'deployer', PROD_SSH_PORT: '22',
   PROD_SSH_PRIVATE_KEY: 'private-key', PROD_KNOWN_HOSTS: 'known-host', PROD_ENV_FILE: 'SETTING=value',
@@ -26,12 +27,15 @@ test('public production inputs validate without accessing production secrets', (
   assert.doesNotThrow(() => release.validateInputs({...env, GITHUB_EVENT_NAME: 'workflow_dispatch'}));
   for (const patch of [
     {GITHUB_EVENT_NAME: 'pull_request'}, {GITHUB_REF: 'refs/heads/dev'}, {GITHUB_SHA: 'abc'},
-    {SERVICE_PROFILE: 'other'}, {COMPOSE_SERVICE: 'a;id'}, {REMOTE_DIR: '/srv/../x'},
-    {COMPOSE_FILE: '../x.yml'}, {DOCKERFILE: '../Dockerfile'}, {HEALTH_URL: 'http://external:8080/x'},
+    {SERVICE_PROFILE: 'other'}, {COMPOSE_FILE: '../x.yml'}, {DOCKERFILE: '../Dockerfile'},
     {HEALTH_TIMEOUT: '601'}, {PLATFORM: 'linux/arm64'},
   ]) assert.throws(() => release.validateInputs({...env, ...patch}));
   assert.doesNotThrow(() => release.validateInputs({...env, DOCKERHUB_PUSH_TOKEN: '', PROD_SSH_PRIVATE_KEY: ''}));
   assert.throws(() => release.validatePublishSecrets({...env, DOCKERHUB_PUSH_TOKEN: ''}));
+  assert.doesNotThrow(() => release.validateDeploymentSettings(env));
+  for (const patch of [{COMPOSE_SERVICE: 'a;id'}, {CONTAINER_NAME: 'bad name'}, {REMOTE_DIR: '/srv/../x'}, {HEALTH_URL: 'http://external:8080/x'}, {PROD_COMPOSE_FILE: '../bad.yml'}]) {
+    assert.throws(() => release.validateDeploymentSettings({...env, ...patch}));
+  }
   assert.doesNotThrow(() => release.validateDeploymentSecrets(env));
   for (const patch of [{PROD_HOST: 'bad;host'}, {PROD_USER: 'Bad User'}, {PROD_SSH_PORT: '65536'}, {PROD_SSH_PRIVATE_KEY: ''}, {PROD_KNOWN_HOSTS: ''}, {PROD_ENV_FILE: 'IMAGE_REF=bad'}]) {
     assert.throws(() => release.validateDeploymentSecrets({...env, ...patch}));
@@ -151,7 +155,7 @@ function runLegacyTransition(failRollback) {
   fs.writeFileSync(path.join(directory, 'state'), `sha256:${'1'.repeat(64)}\n`);
   writeExecutable(path.join(bin, 'flock'), '#!/usr/bin/env bash\nexit 0\n');
   writeExecutable(path.join(bin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
-  writeExecutable(path.join(bin, 'curl'), `#!/usr/bin/env bash\necho "curl $(cat "$FAKE_STATE")" >> "$FAKE_LOG"\n[[ $(cat "$FAKE_STATE") == "sha256:${'1'.repeat(64)}" ]]\n`);
+  writeExecutable(path.join(bin, 'curl'), `#!/usr/bin/env bash\necho "curl $(cat "$FAKE_STATE")" >> "$FAKE_LOG"\nif [[ $(cat "$FAKE_STATE") == "sha256:${'1'.repeat(64)}" ]]; then printf '200'; else printf '302'; fi\n`);
   writeExecutable(path.join(bin, 'docker'), `#!/usr/bin/env bash
 set -eu
 echo "$*" >> "$FAKE_LOG"
@@ -200,6 +204,30 @@ test('rollback failure is surfaced with a distinct failure status', () => {
   try {
     assert.equal(result.status, 2, result.stderr);
     assert.match(`${result.stdout}${result.stderr}`, /Rollback failed/);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('local SSH boundary reports success, recovered rollback, and rollback failure distinctly', () => {
+  const source = fs.readFileSync('scripts/deploy-local.sh', 'utf8');
+  const match = source.match(/report_remote_result\(\) \{[\s\S]*?\n\}/);
+  assert.ok(match);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-result-'));
+  const bash = process.platform === 'win32' ? 'C:/Users/user/AppData/Local/Programs/Git/bin/bash.exe' : 'bash';
+  try {
+    const run = (status, marker) => {
+      const log = path.join(directory, 'ssh.log');
+      fs.writeFileSync(log, `${marker}\n`);
+      return spawnSync(bash, ['-c', `${match[0]}; report_remote_result "$1" "$2"`, '--', String(status), bashPath(log)], {encoding: 'utf8'});
+    };
+    const success = run(0, 'DEPLOY_RESULT=SUCCESS');
+    assert.equal(success.status, 0);
+    assert.match(success.stdout, /Deployment health verified/);
+    const recovered = run(1, 'DEPLOY_RESULT=ROLLED_BACK');
+    assert.equal(recovered.status, 1);
+    assert.match(recovered.stdout, /were restored/);
+    const failed = run(2, 'DEPLOY_RESULT=ROLLBACK_FAILED');
+    assert.equal(failed.status, 2);
+    assert.match(failed.stdout, /rollback verification failed/);
   } finally { fs.rmSync(directory, {recursive: true, force: true}); }
 });
 

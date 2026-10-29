@@ -35,13 +35,14 @@ compose_candidate() {
 [[ $(compose_candidate config --images "$service") == "$image" ]] || { echo 'Candidate image mismatch'; exit 1; }
 
 health() {
-  local expected_image_id=$1 actual_image_id status deadline=$((SECONDS + timeout))
+  local expected_image_id=$1 actual_image_id status http_code deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
     actual_image_id=$(docker inspect --format '{{.Image}}' "$container" 2>/dev/null) || actual_image_id=''
     status=$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null) || status=''
     if [[ $actual_image_id == "$expected_image_id" ]]; then
       if [[ $status == 'true healthy' || $status == 'true none' ]]; then
-        if "$curl_bin" --fail --silent --show-error --max-time 5 "$url" >/dev/null 2>&1; then return 0; fi
+        http_code=$("$curl_bin" --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 5 "$url" 2>/dev/null) || http_code=''
+        if [[ $http_code == '200' ]]; then return 0; fi
       fi
     fi
     "$sleep_bin" 5
@@ -84,8 +85,9 @@ rollback() {
 handle_failure() {
   local original_status=$1
   trap - ERR HUP INT TERM
-  if rollback; then exit "$original_status"; fi
+  if rollback; then echo 'DEPLOY_RESULT=ROLLED_BACK'; exit "$original_status"; fi
   echo 'Rollback failed'
+  echo 'DEPLOY_RESULT=ROLLBACK_FAILED'
   exit 2
 }
 trap 'handle_failure $?' ERR
@@ -101,3 +103,4 @@ health "$candidate_image_id"
 rm -f .deploy-marker
 trap - ERR HUP INT TERM
 printf '%s\n' 'Deployment health verified'
+printf '%s\n' 'DEPLOY_RESULT=SUCCESS'

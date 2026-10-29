@@ -45,9 +45,13 @@ test('production uses Buildx metadata, immutable-tag checks, and same-run digest
 
 test('publish receives every required deployment secret before registry access', () => {
   const publish = production.slice(production.indexOf('  publish:'), production.indexOf('  deploy:'));
-  for (const name of ['DOCKERHUB_NAMESPACE', 'DOCKERHUB_PUSH_TOKEN', 'PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE']) {
+  assert.match(publish, /DOCKERHUB_NAMESPACE: \$\{\{ vars\.DOCKERHUB_NAMESPACE \}\}/);
+  for (const name of ['DOCKERHUB_PUSH_TOKEN', 'PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE']) {
     assert.match(publish, new RegExp(`${name}: \\$\\{\\{ secrets\\.${name} \\}\\}`));
   }
+  for (const name of ['PROD_COMPOSE_SERVICE', 'PROD_CONTAINER_NAME', 'PROD_REMOTE_DIR', 'PROD_HEALTH_URL', 'PROD_COMPOSE_FILE']) assert.match(publish, new RegExp(`vars\\.${name}`));
+  assert.doesNotMatch(production.slice(0, production.indexOf('    secrets:')), /compose-service:|container-name:|remote-dir:|health-url:/);
+  assert.match(publish, /validateDeploymentSettings\(env\)/);
   assert.match(publish, /validateDeploymentSecrets\(env\)/);
 });
 

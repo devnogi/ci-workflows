@@ -2,15 +2,23 @@
 
 const fs = require('node:fs');
 const read = (path) => fs.readFileSync(path, 'utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').trimEnd();
-const indent = (source, count) => source.split('\n').map((line) => `${' '.repeat(count)}${line}`).join('\n');
-const inputs = ['service-profile', 'image-name', 'dockerfile', 'compose-file', 'compose-service', 'container-name', 'remote-dir', 'health-url', 'health-timeout', 'platform'];
-const deployInputs = ['compose-file', 'compose-service', 'container-name', 'remote-dir', 'health-url', 'health-timeout', 'image-ref'];
-const secrets = ['DOCKERHUB_NAMESPACE', 'DOCKERHUB_PUSH_TOKEN', 'PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE'];
+const indent = (source, count) => source.split('\n').map((line) => line ? `${' '.repeat(count)}${line}` : '').join('\n');
+const inputs = ['service-profile', 'image-name', 'dockerfile', 'compose-file', 'health-timeout', 'platform'];
+const deployInputs = ['compose-file', 'health-timeout', 'image-ref'];
+const secrets = ['DOCKERHUB_PUSH_TOKEN', 'PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE'];
 const deploySecrets = ['PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE'];
+const deploymentVariables = {
+  COMPOSE_SERVICE: 'PROD_COMPOSE_SERVICE',
+  CONTAINER_NAME: 'PROD_CONTAINER_NAME',
+  REMOTE_DIR: 'PROD_REMOTE_DIR',
+  HEALTH_URL: 'PROD_HEALTH_URL',
+  PROD_COMPOSE_FILE: 'PROD_COMPOSE_FILE',
+};
 const inputDefinitions = (names) => names.map((name) => `      ${name}:\n        required: true\n        type: string`).join('\n');
 const secretDefinitions = (names) => names.map((name) => `      ${name}:\n        required: true`).join('\n');
 const inputEnvironment = (names) => names.map((name) => `          ${name.toUpperCase().replaceAll('-', '_')}: \${{ inputs.${name} }}`).join('\n');
 const secretEnvironment = (names) => names.map((name) => `          ${name}: \${{ secrets.${name} }}`).join('\n');
+const variableEnvironment = () => Object.entries(deploymentVariables).map(([name, variable]) => `          ${name}: \${{ vars.${variable} }}`).join('\n');
 const release = read('scripts/release.cjs');
 const remote = read('scripts/deploy-remote.sh');
 const local = read('scripts/deploy-local.sh');
@@ -21,14 +29,15 @@ ${integrated ? '    needs: publish\n' : ''}    runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
     concurrency:
-      group: production-\${{ github.repository }}-\${{ inputs.compose-service }}
+      group: production-\${{ github.repository }}-${integrated ? '${{ inputs.image-name }}' : 'compose-deploy'}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Deploy and verify or roll back
         env:
 ${inputEnvironment(deployInputs.filter((name) => name !== 'image-ref'))}
-          IMAGE_REF: ${integrated ? "${{ format('{0}/{1}@{2}', secrets.DOCKERHUB_NAMESPACE, inputs.image-name, needs.publish.outputs.digest) }}" : '${{ inputs.image-ref }}'}
+${variableEnvironment()}
+          IMAGE_REF: ${integrated ? "${{ format('{0}/{1}@{2}', vars.DOCKERHUB_NAMESPACE, inputs.image-name, needs.publish.outputs.digest) }}" : '${{ inputs.image-ref }}'}
 ${secretEnvironment(deploySecrets)}
         run: |
           REMOTE_SCRIPT="$RUNNER_TEMP/deploy-remote.sh"
@@ -103,6 +112,8 @@ ${ciJobs}
         env:
 ${inputEnvironment(inputs)}
           RELEASE_VERSION: \${{ needs.release-version.outputs.version }}
+          DOCKERHUB_NAMESPACE: \${{ vars.DOCKERHUB_NAMESPACE }}
+${variableEnvironment()}
 ${secretEnvironment(secrets)}
         run: |
 ${indent(nodeRun('publish'), 10)}

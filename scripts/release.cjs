@@ -18,11 +18,6 @@ function validateInputs(env) {
   if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(required(env, 'IMAGE_NAME'))) throw Error('Invalid image name');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$/.test(required(env, 'COMPOSE_FILE')) || env.COMPOSE_FILE.includes('..')) throw Error('Invalid compose path');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(required(env, 'DOCKERFILE')) || env.DOCKERFILE.includes('..')) throw Error('Invalid Dockerfile path');
-  for (const key of ['COMPOSE_SERVICE', 'CONTAINER_NAME']) {
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(required(env, key))) throw Error(`Invalid ${key}`);
-  }
-  if (!/^\/(?:[a-zA-Z0-9_-]+\/)*[a-zA-Z0-9_-]+$/.test(required(env, 'REMOTE_DIR'))) throw Error('Invalid remote directory');
-  if (!/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/[a-zA-Z0-9/_-]*$/.test(required(env, 'HEALTH_URL')) || +new URL(env.HEALTH_URL).port > 65535) throw Error('Invalid health URL');
   if (!/^[1-9][0-9]{0,2}$/.test(required(env, 'HEALTH_TIMEOUT')) || +env.HEALTH_TIMEOUT > 600) throw Error('Invalid health timeout');
   if (required(env, 'PLATFORM') !== 'linux/amd64') throw Error('Invalid platform');
 }
@@ -30,6 +25,15 @@ function validateInputs(env) {
 function validatePublishSecrets(env) {
   if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(required(env, 'DOCKERHUB_NAMESPACE'))) throw Error('Invalid Docker Hub namespace');
   required(env, 'DOCKERHUB_PUSH_TOKEN');
+}
+
+function validateDeploymentSettings(env) {
+  for (const key of ['COMPOSE_SERVICE', 'CONTAINER_NAME']) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(required(env, key))) throw Error(`Invalid ${key}`);
+  }
+  if (!/^\/(?:[a-zA-Z0-9_-]+\/)*[a-zA-Z0-9_-]+$/.test(required(env, 'REMOTE_DIR'))) throw Error('Invalid remote directory');
+  if (!/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/[a-zA-Z0-9/_-]*$/.test(required(env, 'HEALTH_URL')) || +new URL(env.HEALTH_URL).port > 65535) throw Error('Invalid health URL');
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$/.test(required(env, 'PROD_COMPOSE_FILE'))) throw Error('Invalid production Compose filename');
 }
 
 function validateDeploymentSecrets(env) {
@@ -107,6 +111,7 @@ function command(name, args) {
 async function publish(env, deps = {}) {
   validateInputs(env);
   validatePublishSecrets(env);
+  validateDeploymentSettings(env);
   validateDeploymentSecrets(env);
   const request = deps.fetch || fetch;
   const run = deps.cmd || command;
@@ -181,7 +186,7 @@ async function publish(env, deps = {}) {
   fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${env.COMPOSE_SERVICE}\n\nVersion: ${release}\n\nCommit: ${sha}\n\nDigest: ${digest}\n`);
 }
 
-module.exports = {collision, immutableTagsRequired, publish, resolveVersion, validateDeploymentSecrets, validateInputs, validatePublishSecrets, version};
+module.exports = {collision, immutableTagsRequired, publish, resolveVersion, validateDeploymentSecrets, validateDeploymentSettings, validateInputs, validatePublishSecrets, version};
 
 if (require.main === module || process.argv[1] === '-') {
   const mode = process.argv[2];
