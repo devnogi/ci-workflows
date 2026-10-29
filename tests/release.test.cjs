@@ -281,6 +281,7 @@ elif [[ $1 == compose ]]; then
   if [[ $joined == *'config --images'* ]]; then echo "$IMAGE_REF"
   elif [[ $joined == *' up '* ]]; then
     if [[ $joined == *'rollback.override.yml'* ]]; then
+      [[ $IMAGE_REF == "$old" ]] || exit 1
       if [[ \${FAIL_ROLLBACK:-0} == 1 ]]; then exit 1; fi
       echo 'set old' >> "$FAKE_LOG"
       echo "$old" > "$FAKE_STATE"

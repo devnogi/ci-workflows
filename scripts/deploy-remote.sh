@@ -70,7 +70,7 @@ rollback() {
   cp "$backup/compose.original" "$original_compose" || return 1
   cp "$backup/env.original" .env.prod || return 1
   if [[ ! -f $backup/canonical-existed ]]; then rm -f compose.yml || return 1; fi
-  if ! docker compose --project-directory "$dir" --env-file .env.prod -f "$original_compose" -f "$backup/rollback.override.yml" up -d --pull never --no-deps "$service"; then
+  if ! IMAGE_REF="$previous_image_id" docker compose --project-directory "$dir" --env-file .env.prod -f "$original_compose" -f "$backup/rollback.override.yml" up -d --pull never --no-deps "$service"; then
     echo 'Rollback service restore failed'
     return 1
   fi
