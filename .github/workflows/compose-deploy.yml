@@ -2,6 +2,9 @@ name: Deploy immutable Compose service
 on:
   workflow_call:
     inputs:
+      deployment-target:
+        required: true
+        type: string
       compose-file:
         required: true
         type: string
@@ -12,17 +15,17 @@ on:
         required: true
         type: string
     secrets:
-      PROD_HOST:
+      PROD2_HOST:
         required: true
-      PROD_USER:
+      PROD2_USER:
         required: true
-      PROD_SSH_PORT:
+      PROD2_SSH_PORT:
         required: true
-      PROD_SSH_PRIVATE_KEY:
+      PROD2_SSH_PRIVATE_KEY:
         required: true
-      PROD_KNOWN_HOSTS:
+      PROD2_HOST_FINGERPRINT:
         required: true
-      PROD_ENV_FILE:
+      PROD2_ENV_FILE:
         required: true
 permissions:
   contents: read
@@ -38,20 +41,21 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Deploy and verify or roll back
         env:
+          DEPLOYMENT_TARGET: ${{ inputs.deployment-target }}
           COMPOSE_FILE: ${{ inputs.compose-file }}
           HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
-          COMPOSE_SERVICE: ${{ vars.PROD_COMPOSE_SERVICE }}
-          CONTAINER_NAME: ${{ vars.PROD_CONTAINER_NAME }}
-          REMOTE_DIR: ${{ vars.PROD_REMOTE_DIR }}
-          HEALTH_URL: ${{ vars.PROD_HEALTH_URL }}
-          PROD_COMPOSE_FILE: ${{ vars.PROD_COMPOSE_FILE }}
+          COMPOSE_SERVICE: ${{ vars.PROD2_COMPOSE_SERVICE }}
+          CONTAINER_NAME: ${{ vars.PROD2_CONTAINER_NAME }}
+          REMOTE_DIR: ${{ vars.PROD2_REMOTE_DIR }}
+          HEALTH_URL: ${{ vars.PROD2_HEALTH_URL }}
+          PROD_COMPOSE_FILE: ${{ vars.PROD2_COMPOSE_FILE }}
           IMAGE_REF: ${{ inputs.image-ref }}
-          PROD_HOST: ${{ secrets.PROD_HOST }}
-          PROD_USER: ${{ secrets.PROD_USER }}
-          PROD_SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
-          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
-          PROD_KNOWN_HOSTS: ${{ secrets.PROD_KNOWN_HOSTS }}
-          PROD_ENV_FILE: ${{ secrets.PROD_ENV_FILE }}
+          PROD2_HOST: ${{ secrets.PROD2_HOST }}
+          PROD2_USER: ${{ secrets.PROD2_USER }}
+          PROD2_SSH_PORT: ${{ secrets.PROD2_SSH_PORT }}
+          PROD2_SSH_PRIVATE_KEY: ${{ secrets.PROD2_SSH_PRIVATE_KEY }}
+          PROD2_HOST_FINGERPRINT: ${{ secrets.PROD2_HOST_FINGERPRINT }}
+          PROD2_ENV_FILE: ${{ secrets.PROD2_ENV_FILE }}
         run: |
           REMOTE_SCRIPT="$RUNNER_TEMP/deploy-remote.sh"
           export REMOTE_SCRIPT
@@ -169,23 +173,36 @@ jobs:
           umask 077
 
           [[ $GITHUB_REF == refs/heads/main && ( $GITHUB_EVENT_NAME == push || $GITHUB_EVENT_NAME == workflow_dispatch ) ]] || exit 1
+          [[ $DEPLOYMENT_TARGET == prod2 ]] || exit 1
+          case "$GITHUB_REPOSITORY" in
+            devnogi/devnogi-gateway-server|devnogi/open-api-batch-server|devnogi/devnogi-community-server|devnogi/devnogi-auth-server|devnogi/devnogi-react) ;;
+            *) echo 'Invalid deployment caller'; exit 1 ;;
+          esac
           [[ $GITHUB_RUN_ID =~ ^[0-9]+$ && $GITHUB_RUN_ATTEMPT =~ ^[0-9]+$ && $IMAGE_REF =~ ^[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || exit 1
           [[ $COMPOSE_SERVICE =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ && $CONTAINER_NAME =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || exit 1
-          [[ $REMOTE_DIR =~ ^/([a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+$ && $PROD_HOST =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ && $PROD_USER =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 1
+          [[ $REMOTE_DIR =~ ^/([a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+$ && $PROD2_HOST =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ && $PROD2_USER =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 1
           [[ $HEALTH_URL =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}/[a-zA-Z0-9/_-]*$ && $HEALTH_TIMEOUT =~ ^[1-9][0-9]{0,2}$ && $HEALTH_TIMEOUT -le 600 ]] || exit 1
-          [[ $PROD_SSH_PORT =~ ^[1-9][0-9]{0,4}$ && $PROD_SSH_PORT -le 65535 ]] || exit 1
+          health_port=${HEALTH_URL#http://127.0.0.1:}
+          health_port=${health_port%%/*}
+          [[ $health_port -le 65535 ]] || exit 1
+          [[ $PROD2_SSH_PORT == 46232 ]] || exit 1
           [[ $COMPOSE_FILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$ && $COMPOSE_FILE != *..* && -f $COMPOSE_FILE ]] || exit 1
           [[ $PROD_COMPOSE_FILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$ ]] || exit 1
-          [[ -n $PROD_SSH_PRIVATE_KEY && -n $PROD_KNOWN_HOSTS && -n $PROD_ENV_FILE ]] || exit 1
-          if grep -Eq '^\s*(export\s+)?IMAGE_REF\s*=' <<< "$PROD_ENV_FILE"; then echo 'Invalid environment'; exit 1; fi
+          [[ -n $PROD2_SSH_PRIVATE_KEY && -n $PROD2_ENV_FILE && $PROD2_HOST_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$ ]] || exit 1
+          if grep -Eq '^\s*(export\s+)?IMAGE_REF\s*=' <<< "$PROD2_ENV_FILE"; then echo 'Invalid environment'; exit 1; fi
 
           work=$(mktemp -d "$RUNNER_TEMP/deploy.XXXXXXXX")
           trap 'rm -rf "$work"' EXIT
-          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$work/key"
-          printf '%s\n' "$PROD_KNOWN_HOSTS" > "$work/known_hosts"
-          printf '%s\n' "$PROD_ENV_FILE" > "$work/env"
+          if ! ssh-keyscan -T 15 -p "$PROD2_SSH_PORT" -t ed25519 "$PROD2_HOST" >"$work/known_hosts" 2>"$work/scan.log" ||
+             ! awk 'NF != 3 || $2 != "ssh-ed25519" { bad=1 } END { exit (bad || NR != 1) }' "$work/known_hosts"; then
+            echo 'Host key scan failed'; exit 1
+          fi
+          fingerprint=$(ssh-keygen -E sha256 -lf "$work/known_hosts" 2>"$work/scan.log") || { echo 'Host key validation failed'; exit 1; }
+          [[ $fingerprint == "256 $PROD2_HOST_FINGERPRINT "*' (ED25519)' ]] || { echo 'Host key validation failed'; exit 1; }
+          printf '%s\n' "$PROD2_SSH_PRIVATE_KEY" > "$work/key"
+          printf '%s\n' "$PROD2_ENV_FILE" > "$work/env"
           chmod 600 "$work/key" "$work/known_hosts" "$work/env"
-          opts=(-i "$work/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$work/known_hosts" -o ConnectTimeout=15)
+          opts=(-i "$work/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$work/known_hosts" -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=15)
           run="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           stage="$REMOTE_DIR/.candidate-$run"
           legacy_compose=$PROD_COMPOSE_FILE
@@ -208,18 +225,18 @@ jobs:
             return 1
           }
 
-          if ! ssh -p "$PROD_SSH_PORT" "${opts[@]}" "$PROD_USER@$PROD_HOST" "mkdir '$stage'" >"$work/ssh.log" 2>&1; then
+          if ! ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" "mkdir '$stage'" >"$work/ssh.log" 2>&1; then
             echo 'Could not create deployment candidate'
             exit 1
           fi
-          if ! scp -P "$PROD_SSH_PORT" "${opts[@]}" "$COMPOSE_FILE" "$PROD_USER@$PROD_HOST:$stage/compose.yml" >"$work/ssh.log" 2>&1 ||
-             ! scp -P "$PROD_SSH_PORT" "${opts[@]}" "$work/env" "$PROD_USER@$PROD_HOST:$stage/.env.prod" >"$work/ssh.log" 2>&1; then
-            ssh -p "$PROD_SSH_PORT" "${opts[@]}" "$PROD_USER@$PROD_HOST" "rm -rf '$stage'" >"$work/ssh.log" 2>&1 || true
+          if ! scp -P "$PROD2_SSH_PORT" "${opts[@]}" "$COMPOSE_FILE" "$PROD2_USER@$PROD2_HOST:$stage/compose.yml" >"$work/ssh.log" 2>&1 ||
+             ! scp -P "$PROD2_SSH_PORT" "${opts[@]}" "$work/env" "$PROD2_USER@$PROD2_HOST:$stage/.env.prod" >"$work/ssh.log" 2>&1; then
+            ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" "rm -rf '$stage'" >"$work/ssh.log" 2>&1 || true
             echo 'Could not stage deployment candidate'
             exit 1
           fi
           set +e
-          ssh -p "$PROD_SSH_PORT" "${opts[@]}" "$PROD_USER@$PROD_HOST" bash -s -- \
+          ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" bash -s -- \
             "$REMOTE_DIR" "$COMPOSE_SERVICE" "$CONTAINER_NAME" "$IMAGE_REF" "$HEALTH_URL" "$HEALTH_TIMEOUT" "$run" "$stage" "$legacy_compose" \
             < "$REMOTE_SCRIPT" >"$work/ssh.log" 2>&1
           remote_status=$?

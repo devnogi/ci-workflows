@@ -12,7 +12,7 @@ Every service name is also bound to its exact `devnogi` caller repository. A rep
 
 `spring-prod.yml` and `node-prod.yml` add `health-timeout` and `platform`. The timeout must be 1–600 seconds and the platform must be `linux/amd64`. Both workflows accept only `push` or `workflow_dispatch` on `main`, repeat the appropriate CI gates against the exact deployment commit, publish the image, deploy its immutable digest, verify health and recovery, and create the repository GitHub Release only after deployment succeeds.
 
-`compose-deploy.yml` remains separately callable for a pre-verified digest. It reads `PROD_COMPOSE_SERVICE`, `PROD_CONTAINER_NAME`, `PROD_REMOTE_DIR`, `PROD_HEALTH_URL`, and `PROD_COMPOSE_FILE` from the caller's `production` Environment. It requires `PROD_HOST`, `PROD_USER`, `PROD_SSH_PORT`, `PROD_SSH_PRIVATE_KEY`, `PROD_KNOWN_HOSTS`, and `PROD_ENV_FILE`. `PROD_KNOWN_HOSTS` must be independently verified, and `PROD_ENV_FILE` must contain the complete candidate environment without `IMAGE_REF`.
+`compose-deploy.yml` remains separately callable for a pre-verified digest by the five application repositories only; each is fixed to prod2. It reads `PROD2_COMPOSE_SERVICE`, `PROD2_CONTAINER_NAME`, `PROD2_REMOTE_DIR`, `PROD2_HEALTH_URL`, and `PROD2_COMPOSE_FILE` from the caller's `production` Environment. It requires `PROD2_HOST`, `PROD2_USER`, `PROD2_SSH_PORT` (46232), `PROD2_SSH_PRIVATE_KEY`, `PROD2_HOST_FINGERPRINT`, and `PROD2_ENV_FILE`. The fingerprint must be independently authenticated and cross-checked before configuration. The environment file must contain the complete candidate environment without `IMAGE_REF`.
 
 ## Organization configuration
 
@@ -21,7 +21,7 @@ Define these GitHub Actions organization variables and grant only the five produ
 - `DOCKERHUB_REPOSITORY=devanted/memonogi`
 - `DOCKERHUB_USERNAME=devanted`
 
-Define organization secret `DOCKERHUB_PUSH_TOKEN` with Docker Hub Read/Write permission and no Delete permission, again limited to the five production repositories. SSH and production application settings stay in each repository's `production` Environment because they differ by service. Callers use `secrets: inherit`; the called jobs explicitly select the required values. GitHub Releases use the built-in `GITHUB_TOKEN`, so no PAT is required. Production callers must grant `contents: write`; the reusable workflow restricts that permission to its release job while all other jobs remain read-only.
+Define organization secret `DOCKERHUB_PUSH_TOKEN` with Docker Hub Read/Write permission and no Delete permission, again limited to the five production repositories. The prod2 host, user, port, private key and fingerprint are organization Secrets scoped to the callers; each repository's `production` Environment supplies its `PROD2_ENV_FILE` Secret and prod2 deployment Variables. Callers use `secrets: inherit`; the called jobs explicitly select the required values. GitHub Releases use the built-in `GITHUB_TOKEN`, so no PAT is required. Production callers must grant `contents: write`; the reusable workflow restricts that permission to its release job while all other jobs remain read-only.
 
 ## Version, image, and release contract
 
@@ -53,7 +53,7 @@ The workflow validates but never changes Docker Hub repository settings. Publica
 
 The production host needs Bash, `flock`, Docker Compose v2, and curl. The SSH user needs Docker access and write access to the configured deployment directory. The candidate Compose target service must use `${IMAGE_REF:?IMAGE_REF is required}`.
 
-The workflow stages the candidate Compose and `.env.prod`, locks the deployment directory, stores the current Compose, environment, filename, and running image ID, then writes an execution marker. It replaces only the target service using `docker compose up -d --pull never --no-deps`. It verifies the exact image ID, Docker health when present, and the localhost HTTP endpoint. On failure, only the marker owner restores the saved files and image ID and verifies recovery. Rollback failure exits distinctly. Successful deployment removes the marker; timestamped backups remain available to operators.
+Before authentication, the workflow scans a single Ed25519 host key, checks its SHA-256 fingerprint against the independently authenticated secret, and uses the matching key in an ephemeral strict OpenSSH host-key file. It removes the runner files on exit. The workflow stages the candidate Compose and `.env.prod`, locks the deployment directory, stores the current Compose, environment, filename, and running image ID, then writes an execution marker. It replaces only the target service using `docker compose up -d --pull never --no-deps`. It verifies the exact image ID, Docker health when present, and the localhost HTTP endpoint. On failure, only the marker owner restores the saved files and image ID and verifies recovery. Rollback failure exits distinctly. Successful deployment removes the marker; timestamped backups remain available to operators.
 
 ## Development
 

@@ -14,14 +14,14 @@ const env = {
   GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'push', GITHUB_SHA: sha,
   GITHUB_SERVER_URL: 'https://github.com', GITHUB_API_URL: 'https://api.github.com', GITHUB_REPOSITORY: 'devnogi/devnogi-gateway-server',
   GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '1', GITHUB_TOKEN: 'github-token',
-  SERVICE_NAME: 'gateway', SERVICE_PROFILE: 'base', COMPOSE_FILE: 'compose.yml', DOCKERFILE: 'Dockerfile',
+  SERVICE_NAME: 'gateway', SERVICE_PROFILE: 'base', DEPLOYMENT_TARGET: 'prod2', COMPOSE_FILE: 'compose.yml', DOCKERFILE: 'Dockerfile',
   COMPOSE_SERVICE: 'app', CONTAINER_NAME: 'app-prod', REMOTE_DIR: '/srv/app',
   HEALTH_URL: 'http://127.0.0.1:8080/actuator/health', HEALTH_TIMEOUT: '60', PLATFORM: 'linux/amd64',
   PROD_COMPOSE_FILE: 'docker-compose-prod.yml',
   RELEASE_VERSION: '1.2.3', IMAGE_DIGEST: digest, DOCKERHUB_USERNAME: 'devanted',
   DOCKERHUB_REPOSITORY: 'devanted/memonogi', DOCKERHUB_PUSH_TOKEN: 'secret',
-  PROD_HOST: 'server.example', PROD_USER: 'deployer', PROD_SSH_PORT: '22',
-  PROD_SSH_PRIVATE_KEY: 'private-key', PROD_KNOWN_HOSTS: 'known-host', PROD_ENV_FILE: 'SETTING=value',
+  PROD2_HOST: 'server.example', PROD2_USER: 'deployer', PROD2_SSH_PORT: '46232',
+  PROD2_SSH_PRIVATE_KEY: 'private-key', PROD2_HOST_FINGERPRINT: 'SHA256:' + 'A'.repeat(43), PROD2_ENV_FILE: 'SETTING=value',
 };
 
 test('public production inputs validate without accessing production secrets', () => {
@@ -29,17 +29,17 @@ test('public production inputs validate without accessing production secrets', (
   assert.doesNotThrow(() => release.validateInputs({...env, GITHUB_EVENT_NAME: 'workflow_dispatch'}));
   for (const patch of [
     {GITHUB_EVENT_NAME: 'pull_request'}, {GITHUB_REF: 'refs/heads/dev'}, {GITHUB_SHA: 'abc'},
-    {SERVICE_PROFILE: 'other'}, {SERVICE_NAME: 'react'}, {GITHUB_REPOSITORY: 'devnogi/unexpected'}, {COMPOSE_FILE: '../x.yml'}, {DOCKERFILE: '../Dockerfile'},
+    {SERVICE_PROFILE: 'other'}, {SERVICE_NAME: 'react'}, {DEPLOYMENT_TARGET: 'prod1'}, {GITHUB_REPOSITORY: 'devnogi/unexpected'}, {COMPOSE_FILE: '../x.yml'}, {DOCKERFILE: '../Dockerfile'},
     {HEALTH_TIMEOUT: '601'}, {PLATFORM: 'linux/arm64'},
   ]) assert.throws(() => release.validateInputs({...env, ...patch}));
-  assert.doesNotThrow(() => release.validateInputs({...env, DOCKERHUB_PUSH_TOKEN: '', PROD_SSH_PRIVATE_KEY: ''}));
+  assert.doesNotThrow(() => release.validateInputs({...env, DOCKERHUB_PUSH_TOKEN: '', PROD2_SSH_PRIVATE_KEY: ''}));
   assert.throws(() => release.validatePublishSecrets({...env, DOCKERHUB_PUSH_TOKEN: ''}));
   assert.doesNotThrow(() => release.validateDeploymentSettings(env));
   for (const patch of [{COMPOSE_SERVICE: 'a;id'}, {CONTAINER_NAME: 'bad name'}, {REMOTE_DIR: '/srv/../x'}, {HEALTH_URL: 'http://external:8080/x'}, {PROD_COMPOSE_FILE: '../bad.yml'}]) {
     assert.throws(() => release.validateDeploymentSettings({...env, ...patch}));
   }
   assert.doesNotThrow(() => release.validateDeploymentSecrets(env));
-  for (const patch of [{PROD_HOST: 'bad;host'}, {PROD_USER: 'Bad User'}, {PROD_SSH_PORT: '65536'}, {PROD_SSH_PRIVATE_KEY: ''}, {PROD_KNOWN_HOSTS: ''}, {PROD_ENV_FILE: 'IMAGE_REF=bad'}]) {
+  for (const patch of [{PROD2_HOST: 'bad;host'}, {PROD2_USER: 'Bad User'}, {PROD2_SSH_PORT: '65536'}, {PROD2_SSH_PRIVATE_KEY: ''}, {PROD2_HOST_FINGERPRINT: ''}, {PROD2_ENV_FILE: 'IMAGE_REF=bad'}]) {
     assert.throws(() => release.validateDeploymentSecrets({...env, ...patch}));
   }
 });
@@ -236,10 +236,10 @@ test('GitHub Release refuses tag, commit, digest, and metadata mismatches withou
 test('invalid deployment secrets stop publication before registry access', async () => {
   let requested = false;
   await assert.rejects(
-    release.publish({...env, PROD_SSH_PRIVATE_KEY: '', RUNNER_TEMP: 'temp', GITHUB_OUTPUT: 'output', GITHUB_STEP_SUMMARY: 'summary'}, {
+    release.publish({...env, PROD2_SSH_PRIVATE_KEY: '', RUNNER_TEMP: 'temp', GITHUB_OUTPUT: 'output', GITHUB_STEP_SUMMARY: 'summary'}, {
       fetch: async () => { requested = true; throw Error('must not be called'); },
     }),
-    /Missing PROD_SSH_PRIVATE_KEY/,
+    /Missing PROD2_SSH_PRIVATE_KEY/,
   );
   assert.equal(requested, false);
 });

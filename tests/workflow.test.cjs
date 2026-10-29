@@ -33,6 +33,15 @@ test('publish is serialized by caller, service, and resolved version', () => {
   assert.match(production, /needs: \[preflight, release-version, validate, auth-mysql, verify, community-redis, secret-scan, container\]/);
 });
 
+test('production workflows declare and enforce the fixed prod2 target', () => {
+  for (const workflow of [production, nodeProduction, deployment]) {
+    assert.match(workflow, /deployment-target:\n\s+required: true\n\s+type: string/);
+    assert.match(workflow, /DEPLOYMENT_TARGET: \$\{\{ inputs\.deployment-target \}\}/);
+  }
+  for (const workflow of [production, nodeProduction]) assert.match(workflow, /Invalid deployment target/);
+  assert.match(deployment, /\[\[ \$DEPLOYMENT_TARGET == prod2 \]\]/);
+});
+
 test('preflight has no production environment or secret references', () => {
   const preflight = production.slice(production.indexOf('  preflight:'), production.indexOf('  release-version:'));
   assert.doesNotMatch(preflight, /environment: production|\$\{\{ secrets\./);
@@ -54,10 +63,10 @@ test('publish receives every required deployment secret before registry access',
   const publish = production.slice(production.indexOf('  publish:'), production.indexOf('  deploy:'));
   assert.match(publish, /DOCKERHUB_USERNAME: \$\{\{ vars\.DOCKERHUB_USERNAME \}\}/);
   assert.match(publish, /DOCKERHUB_REPOSITORY: \$\{\{ vars\.DOCKERHUB_REPOSITORY \}\}/);
-  for (const name of ['DOCKERHUB_PUSH_TOKEN', 'PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE']) {
+  for (const name of ['DOCKERHUB_PUSH_TOKEN', 'PROD2_HOST', 'PROD2_USER', 'PROD2_SSH_PORT', 'PROD2_SSH_PRIVATE_KEY', 'PROD2_HOST_FINGERPRINT', 'PROD2_ENV_FILE']) {
     assert.match(publish, new RegExp(`${name}: \\$\\{\\{ secrets\\.${name} \\}\\}`));
   }
-  for (const name of ['PROD_COMPOSE_SERVICE', 'PROD_CONTAINER_NAME', 'PROD_REMOTE_DIR', 'PROD_HEALTH_URL', 'PROD_COMPOSE_FILE']) assert.match(publish, new RegExp(`vars\\.${name}`));
+  for (const name of ['PROD2_COMPOSE_SERVICE', 'PROD2_CONTAINER_NAME', 'PROD2_REMOTE_DIR', 'PROD2_HEALTH_URL', 'PROD2_COMPOSE_FILE']) assert.match(publish, new RegExp(`vars\\.${name}`));
   assert.doesNotMatch(production.slice(0, production.indexOf('    secrets:')), /compose-service:|container-name:|remote-dir:|health-url:/);
   assert.match(publish, /validateDeploymentSettings\(env\)/);
   assert.match(publish, /validateDeploymentSecrets\(env\)/);
@@ -68,7 +77,7 @@ test('deployment has strict known hosts and legacy recovery state', () => {
   assert.match(deployment, /StrictHostKeyChecking=yes/);
   assert.match(deployment, /legacy_compose/);
   assert.match(deployment, /previous_image_id/);
-  assert.doesNotMatch(deployment, /ssh-keyscan/);
+  assert.match(deployment, /ssh-keyscan/);
 });
 
 test('validation checks out the caller and main PRs reject an existing production version', () => {

@@ -34,6 +34,7 @@ function validateInputs(env) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(required(env, 'GITHUB_REPOSITORY'))) throw Error('Invalid caller repository');
   const service = required(env, 'SERVICE_NAME');
   const profile = required(env, 'SERVICE_PROFILE');
+  if (required(env, 'DEPLOYMENT_TARGET') !== 'prod2') throw Error('Invalid deployment target');
   if (!Object.hasOwn(serviceProfiles, service) || serviceProfiles[service] !== profile) throw Error('Invalid service profile mapping');
   if (serviceRepositories[service] !== env.GITHUB_REPOSITORY) throw Error('Caller repository does not match service');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$/.test(required(env, 'COMPOSE_FILE')) || env.COMPOSE_FILE.includes('..')) throw Error('Invalid compose path');
@@ -58,11 +59,13 @@ function validateDeploymentSettings(env) {
 }
 
 function validateDeploymentSecrets(env) {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(required(env, 'PROD_HOST'))) throw Error('Invalid production host');
-  if (!/^[a-z_][a-z0-9_-]*$/.test(required(env, 'PROD_USER'))) throw Error('Invalid production user');
-  if (!/^[1-9][0-9]{0,4}$/.test(required(env, 'PROD_SSH_PORT')) || +env.PROD_SSH_PORT > 65535) throw Error('Invalid production SSH port');
-  for (const key of ['PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE']) required(env, key);
-  if (/^\s*(?:export\s+)?IMAGE_REF\s*=/m.test(env.PROD_ENV_FILE)) throw Error('PROD_ENV_FILE must not set IMAGE_REF');
+  if (!Object.values(serviceRepositories).includes(required(env, 'GITHUB_REPOSITORY'))) throw Error('Invalid deployment caller');
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(required(env, 'PROD2_HOST'))) throw Error('Invalid production host');
+  if (!/^[a-z_][a-z0-9_-]*$/.test(required(env, 'PROD2_USER'))) throw Error('Invalid production user');
+  if (required(env, 'PROD2_SSH_PORT') !== '46232') throw Error('Invalid production SSH port');
+  if (!/^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$/.test(required(env, 'PROD2_HOST_FINGERPRINT'))) throw Error('Invalid production fingerprint');
+  for (const key of ['PROD2_SSH_PRIVATE_KEY', 'PROD2_ENV_FILE']) required(env, key);
+  if (/^\s*(?:export\s+)?IMAGE_REF\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set IMAGE_REF');
 }
 
 function version(value, allowSnapshot = true) {

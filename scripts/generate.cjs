@@ -3,17 +3,17 @@
 const fs = require('node:fs');
 const read = (path) => fs.readFileSync(path, 'utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').trimEnd();
 const indent = (source, count) => source.split('\n').map((line) => line ? `${' '.repeat(count)}${line}` : '').join('\n');
-const springInputs = ['service-profile', 'service-name', 'dockerfile', 'compose-file', 'health-timeout', 'platform'];
-const nodeInputs = ['service-name', 'dockerfile', 'compose-file', 'health-timeout', 'platform'];
-const deployInputs = ['compose-file', 'health-timeout', 'image-ref'];
-const secrets = ['DOCKERHUB_PUSH_TOKEN', 'PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE'];
-const deploySecrets = ['PROD_HOST', 'PROD_USER', 'PROD_SSH_PORT', 'PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE'];
+const springInputs = ['service-profile', 'service-name', 'deployment-target', 'dockerfile', 'compose-file', 'health-timeout', 'platform'];
+const nodeInputs = ['service-name', 'deployment-target', 'dockerfile', 'compose-file', 'health-timeout', 'platform'];
+const deployInputs = ['deployment-target', 'compose-file', 'health-timeout', 'image-ref'];
+const secrets = ['DOCKERHUB_PUSH_TOKEN', 'PROD2_HOST', 'PROD2_USER', 'PROD2_SSH_PORT', 'PROD2_SSH_PRIVATE_KEY', 'PROD2_HOST_FINGERPRINT', 'PROD2_ENV_FILE'];
+const deploySecrets = secrets.slice(1);
 const deploymentVariables = {
-  COMPOSE_SERVICE: 'PROD_COMPOSE_SERVICE',
-  CONTAINER_NAME: 'PROD_CONTAINER_NAME',
-  REMOTE_DIR: 'PROD_REMOTE_DIR',
-  HEALTH_URL: 'PROD_HEALTH_URL',
-  PROD_COMPOSE_FILE: 'PROD_COMPOSE_FILE',
+  COMPOSE_SERVICE: 'PROD2_COMPOSE_SERVICE',
+  CONTAINER_NAME: 'PROD2_CONTAINER_NAME',
+  REMOTE_DIR: 'PROD2_REMOTE_DIR',
+  HEALTH_URL: 'PROD2_HEALTH_URL',
+  PROD_COMPOSE_FILE: 'PROD2_COMPOSE_FILE',
 };
 const inputDefinitions = (names) => names.map((name) => `      ${name}:\n        required: true\n        type: string`).join('\n');
 const secretDefinitions = (names) => names.map((name) => `      ${name}:\n        required: true`).join('\n');
