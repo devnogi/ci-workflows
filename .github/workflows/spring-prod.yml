@@ -1,0 +1,1176 @@
+name: Spring production
+on:
+  workflow_call:
+    inputs:
+      service-profile:
+        required: true
+        type: string
+      image-name:
+        required: true
+        type: string
+      dockerfile:
+        required: true
+        type: string
+      compose-file:
+        required: true
+        type: string
+      compose-service:
+        required: true
+        type: string
+      container-name:
+        required: true
+        type: string
+      remote-dir:
+        required: true
+        type: string
+      health-url:
+        required: true
+        type: string
+      health-timeout:
+        required: true
+        type: string
+      platform:
+        required: true
+        type: string
+    secrets:
+      DOCKERHUB_NAMESPACE:
+        required: true
+      DOCKERHUB_PUSH_TOKEN:
+        required: true
+      PROD_HOST:
+        required: true
+      PROD_USER:
+        required: true
+      PROD_SSH_PORT:
+        required: true
+      PROD_SSH_PRIVATE_KEY:
+        required: true
+      PROD_KNOWN_HOSTS:
+        required: true
+      PROD_ENV_FILE:
+        required: true
+    outputs:
+      version:
+        value: ${{ jobs.publish.outputs.version }}
+      digest:
+        value: ${{ jobs.publish.outputs.digest }}
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate production request
+        env:
+          SERVICE_PROFILE: ${{ inputs.service-profile }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          COMPOSE_SERVICE: ${{ inputs.compose-service }}
+          CONTAINER_NAME: ${{ inputs.container-name }}
+          REMOTE_DIR: ${{ inputs.remote-dir }}
+          HEALTH_URL: ${{ inputs.health-url }}
+          HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          node - validate-inputs <<'RELEASE_SCRIPT'
+          'use strict';
+          
+          const {execFileSync, spawnSync} = require('node:child_process');
+          
+          function required(env, key) {
+            if (!env[key] || !env[key].trim()) throw Error(`Missing ${key}`);
+            return env[key];
+          }
+          
+          function validateInputs(env) {
+            if (env.GITHUB_REF !== 'refs/heads/main' || !['push', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME)) {
+              throw Error('Production requires a main push or dispatch');
+            }
+            if (!/^[a-f0-9]{40}$/.test(required(env, 'GITHUB_SHA'))) throw Error('Invalid commit');
+            if (!/^https:\/\/github\.com$/.test(required(env, 'GITHUB_SERVER_URL'))) throw Error('Invalid GitHub server');
+            if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(required(env, 'GITHUB_REPOSITORY'))) throw Error('Invalid caller repository');
+            if (!['base', 'auth-mysql', 'community-redis', 'batch'].includes(required(env, 'SERVICE_PROFILE'))) throw Error('Invalid profile');
+            if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(required(env, 'IMAGE_NAME'))) throw Error('Invalid image name');
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$/.test(required(env, 'COMPOSE_FILE')) || env.COMPOSE_FILE.includes('..')) throw Error('Invalid compose path');
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(required(env, 'DOCKERFILE')) || env.DOCKERFILE.includes('..')) throw Error('Invalid Dockerfile path');
+            for (const key of ['COMPOSE_SERVICE', 'CONTAINER_NAME']) {
+              if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(required(env, key))) throw Error(`Invalid ${key}`);
+            }
+            if (!/^\/(?:[a-zA-Z0-9_-]+\/)*[a-zA-Z0-9_-]+$/.test(required(env, 'REMOTE_DIR'))) throw Error('Invalid remote directory');
+            if (!/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/[a-zA-Z0-9/_-]*$/.test(required(env, 'HEALTH_URL')) || +new URL(env.HEALTH_URL).port > 65535) throw Error('Invalid health URL');
+            if (!/^[1-9][0-9]{0,2}$/.test(required(env, 'HEALTH_TIMEOUT')) || +env.HEALTH_TIMEOUT > 600) throw Error('Invalid health timeout');
+            if (required(env, 'PLATFORM') !== 'linux/amd64') throw Error('Invalid platform');
+          }
+          
+          function validatePublishSecrets(env) {
+            if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(required(env, 'DOCKERHUB_NAMESPACE'))) throw Error('Invalid Docker Hub namespace');
+            required(env, 'DOCKERHUB_PUSH_TOKEN');
+          }
+          
+          function validateDeploymentSecrets(env) {
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(required(env, 'PROD_HOST'))) throw Error('Invalid production host');
+            if (!/^[a-z_][a-z0-9_-]*$/.test(required(env, 'PROD_USER'))) throw Error('Invalid production user');
+            if (!/^[1-9][0-9]{0,4}$/.test(required(env, 'PROD_SSH_PORT')) || +env.PROD_SSH_PORT > 65535) throw Error('Invalid production SSH port');
+            for (const key of ['PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE']) required(env, key);
+            if (/^\s*(?:export\s+)?IMAGE_REF\s*=/m.test(env.PROD_ENV_FILE)) throw Error('PROD_ENV_FILE must not set IMAGE_REF');
+          }
+          
+          function version(value) {
+            const release = value.trim().replace(/-SNAPSHOT$/, '');
+            if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(release)) throw Error('Invalid Gradle version');
+            return release;
+          }
+          
+          function collision(versionDigest, shaDigest) {
+            if (versionDigest === null && shaDigest === null) return 'build';
+            if (versionDigest && shaDigest && versionDigest === shaDigest && /^sha256:[a-f0-9]{64}$/.test(versionDigest)) return 'reuse';
+            throw Error('Conflicting or incomplete existing tags');
+          }
+          
+          function immutableTagsRequired(info, tags) {
+            if (!info || info.is_private !== false) throw Error('Public Docker Hub repository required');
+            const settings = info.immutable_tags_settings;
+            if (!settings || settings.enabled !== true || !Array.isArray(settings.rules)) throw Error('Docker Hub immutable tags are required');
+            if (settings.rules.length === 0) return;
+            if (!Array.isArray(tags) || tags.length !== 2) throw Error('Published tags are required for immutable-rule validation');
+            const [versionTag, shaTag] = tags;
+            if (!/^prod-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(versionTag) || !/^sha-[a-f0-9]{40}$/.test(shaTag)) {
+              throw Error('Unexpected published tag format');
+            }
+            const allTags = settings.rules.includes('.*') || settings.rules.includes('^.*$');
+            const versionRule = settings.rules.includes('^prod-v[0-9]+\\.[0-9]+\\.[0-9]+$');
+            const shaRule = settings.rules.includes('^sha-[0-9a-f]{40}$');
+            if (!allTags && !(versionRule && shaRule)) {
+              throw Error('Use all-tag immutability or the documented exact production and SHA rules');
+            }
+          }
+          
+          function resolveVersion(env, deps = {}) {
+            const gradle = deps.execFileSync || execFileSync;
+            const fs = deps.fs || require('node:fs');
+            let output;
+            try {
+              output = gradle('./gradlew', ['properties', '-q'], {encoding: 'utf8'});
+            } catch {
+              throw Error('Gradle version resolution failed');
+            }
+            const matches = [...output.matchAll(/^version:\s*(.+)$/gm)];
+            if (matches.length !== 1) throw Error('Cannot resolve root Gradle version');
+            const release = version(matches[0][1]);
+            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\n`);
+            return release;
+          }
+          
+          async function hub(path, token, request) {
+            const response = await request(`https://hub.docker.com/v2/${path}`, {
+              headers: {Authorization: `Bearer ${token}`},
+              signal: AbortSignal.timeout(30000),
+            });
+            if (response.status === 404) return null;
+            if (!response.ok) throw Error(`Docker Hub request failed (${response.status})`);
+            return response.json();
+          }
+          
+          function command(name, args) {
+            try {
+              execFileSync(name, args, {stdio: 'ignore'});
+            } catch {
+              throw Error('Docker command failed');
+            }
+          }
+          
+          async function publish(env, deps = {}) {
+            validateInputs(env);
+            validatePublishSecrets(env);
+            validateDeploymentSecrets(env);
+            const request = deps.fetch || fetch;
+            const run = deps.cmd || command;
+            const login = deps.spawnSync || spawnSync;
+            const fs = deps.fs || require('node:fs');
+            const release = version(required(env, 'RELEASE_VERSION'));
+            const sha = env.GITHUB_SHA;
+            const namespace = env.DOCKERHUB_NAMESPACE;
+            const repository = env.IMAGE_NAME;
+            const image = `${namespace}/${repository}`;
+            const versionTag = `prod-v${release}`;
+            const shaTag = `sha-${sha}`;
+          
+            const auth = await request('https://hub.docker.com/v2/auth/token', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({identifier: namespace, secret: env.DOCKERHUB_PUSH_TOKEN}),
+              signal: AbortSignal.timeout(30000),
+            });
+            if (!auth.ok) throw Error(`Docker Hub authentication failed (${auth.status})`);
+            const token = (await auth.json()).access_token;
+            if (!token) throw Error('Docker Hub token missing');
+          
+            const info = await hub(`namespaces/${namespace}/repositories/${repository}`, token, request);
+            immutableTagsRequired(info, [versionTag, shaTag]);
+            const readDigest = async (tag) => {
+              const tagInfo = await hub(`namespaces/${namespace}/repositories/${repository}/tags/${tag}`, token, request);
+              return tagInfo ? tagInfo.digest : null;
+            };
+          
+            let versionDigest = await readDigest(versionTag);
+            let shaDigest = await readDigest(shaTag);
+            const state = collision(versionDigest, shaDigest);
+            let digest;
+            if (state === 'reuse') {
+              digest = versionDigest;
+            } else {
+              const loginResult = login('docker', ['login', '--username', namespace, '--password-stdin'], {
+                input: env.DOCKERHUB_PUSH_TOKEN,
+                stdio: ['pipe', 'ignore', 'pipe'],
+              });
+              if (loginResult.status !== 0) throw Error('Docker login failed');
+              if (await readDigest(versionTag) !== null || await readDigest(shaTag) !== null) throw Error('Tag appeared before publication');
+          
+              const metadataFile = `${env.RUNNER_TEMP}/build-metadata.json`;
+              run('docker', [
+                'buildx', 'build', '--push',
+                '--platform', env.PLATFORM,
+                '--file', env.DOCKERFILE,
+                '--tag', `${image}:${versionTag}`,
+                '--tag', `${image}:${shaTag}`,
+                '--label', `org.opencontainers.image.revision=${sha}`,
+                '--label', `org.opencontainers.image.source=${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}`,
+                '--label', `org.opencontainers.image.version=${release}`,
+                '--metadata-file', metadataFile,
+                '.',
+              ]);
+              let metadata;
+              try {
+                metadata = JSON.parse(fs.readFileSync(metadataFile, 'utf8'));
+              } catch {
+                throw Error('Buildx metadata unavailable');
+              }
+              digest = metadata['containerimage.digest'];
+              if (!/^sha256:[a-f0-9]{64}$/.test(digest || '')) throw Error('Buildx digest unavailable');
+              versionDigest = await readDigest(versionTag);
+              shaDigest = await readDigest(shaTag);
+              if (versionDigest !== digest || shaDigest !== digest) throw Error('Registry digest does not match Buildx output');
+            }
+          
+            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\n`);
+            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${env.COMPOSE_SERVICE}\n\nVersion: ${release}\n\nCommit: ${sha}\n\nDigest: ${digest}\n`);
+          }
+          
+          module.exports = {collision, immutableTagsRequired, publish, resolveVersion, validateDeploymentSecrets, validateInputs, validatePublishSecrets, version};
+          
+          if (require.main === module || process.argv[1] === '-') {
+            const mode = process.argv[2];
+            Promise.resolve()
+              .then(() => {
+                if (mode === 'validate-inputs') return validateInputs(process.env);
+                if (mode === 'resolve-version') return resolveVersion(process.env);
+                if (mode === 'publish') return publish(process.env);
+                throw Error('Invalid mode');
+              })
+              .catch((error) => {
+                console.error(error.message);
+                process.exitCode = 1;
+              });
+          }
+          RELEASE_SCRIPT
+  release-version:
+    needs: preflight
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - run: chmod +x gradlew
+      - name: Resolve release version
+        id: version
+        run: |
+          node - resolve-version <<'RELEASE_SCRIPT'
+          'use strict';
+          
+          const {execFileSync, spawnSync} = require('node:child_process');
+          
+          function required(env, key) {
+            if (!env[key] || !env[key].trim()) throw Error(`Missing ${key}`);
+            return env[key];
+          }
+          
+          function validateInputs(env) {
+            if (env.GITHUB_REF !== 'refs/heads/main' || !['push', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME)) {
+              throw Error('Production requires a main push or dispatch');
+            }
+            if (!/^[a-f0-9]{40}$/.test(required(env, 'GITHUB_SHA'))) throw Error('Invalid commit');
+            if (!/^https:\/\/github\.com$/.test(required(env, 'GITHUB_SERVER_URL'))) throw Error('Invalid GitHub server');
+            if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(required(env, 'GITHUB_REPOSITORY'))) throw Error('Invalid caller repository');
+            if (!['base', 'auth-mysql', 'community-redis', 'batch'].includes(required(env, 'SERVICE_PROFILE'))) throw Error('Invalid profile');
+            if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(required(env, 'IMAGE_NAME'))) throw Error('Invalid image name');
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$/.test(required(env, 'COMPOSE_FILE')) || env.COMPOSE_FILE.includes('..')) throw Error('Invalid compose path');
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(required(env, 'DOCKERFILE')) || env.DOCKERFILE.includes('..')) throw Error('Invalid Dockerfile path');
+            for (const key of ['COMPOSE_SERVICE', 'CONTAINER_NAME']) {
+              if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(required(env, key))) throw Error(`Invalid ${key}`);
+            }
+            if (!/^\/(?:[a-zA-Z0-9_-]+\/)*[a-zA-Z0-9_-]+$/.test(required(env, 'REMOTE_DIR'))) throw Error('Invalid remote directory');
+            if (!/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/[a-zA-Z0-9/_-]*$/.test(required(env, 'HEALTH_URL')) || +new URL(env.HEALTH_URL).port > 65535) throw Error('Invalid health URL');
+            if (!/^[1-9][0-9]{0,2}$/.test(required(env, 'HEALTH_TIMEOUT')) || +env.HEALTH_TIMEOUT > 600) throw Error('Invalid health timeout');
+            if (required(env, 'PLATFORM') !== 'linux/amd64') throw Error('Invalid platform');
+          }
+          
+          function validatePublishSecrets(env) {
+            if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(required(env, 'DOCKERHUB_NAMESPACE'))) throw Error('Invalid Docker Hub namespace');
+            required(env, 'DOCKERHUB_PUSH_TOKEN');
+          }
+          
+          function validateDeploymentSecrets(env) {
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(required(env, 'PROD_HOST'))) throw Error('Invalid production host');
+            if (!/^[a-z_][a-z0-9_-]*$/.test(required(env, 'PROD_USER'))) throw Error('Invalid production user');
+            if (!/^[1-9][0-9]{0,4}$/.test(required(env, 'PROD_SSH_PORT')) || +env.PROD_SSH_PORT > 65535) throw Error('Invalid production SSH port');
+            for (const key of ['PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE']) required(env, key);
+            if (/^\s*(?:export\s+)?IMAGE_REF\s*=/m.test(env.PROD_ENV_FILE)) throw Error('PROD_ENV_FILE must not set IMAGE_REF');
+          }
+          
+          function version(value) {
+            const release = value.trim().replace(/-SNAPSHOT$/, '');
+            if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(release)) throw Error('Invalid Gradle version');
+            return release;
+          }
+          
+          function collision(versionDigest, shaDigest) {
+            if (versionDigest === null && shaDigest === null) return 'build';
+            if (versionDigest && shaDigest && versionDigest === shaDigest && /^sha256:[a-f0-9]{64}$/.test(versionDigest)) return 'reuse';
+            throw Error('Conflicting or incomplete existing tags');
+          }
+          
+          function immutableTagsRequired(info, tags) {
+            if (!info || info.is_private !== false) throw Error('Public Docker Hub repository required');
+            const settings = info.immutable_tags_settings;
+            if (!settings || settings.enabled !== true || !Array.isArray(settings.rules)) throw Error('Docker Hub immutable tags are required');
+            if (settings.rules.length === 0) return;
+            if (!Array.isArray(tags) || tags.length !== 2) throw Error('Published tags are required for immutable-rule validation');
+            const [versionTag, shaTag] = tags;
+            if (!/^prod-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(versionTag) || !/^sha-[a-f0-9]{40}$/.test(shaTag)) {
+              throw Error('Unexpected published tag format');
+            }
+            const allTags = settings.rules.includes('.*') || settings.rules.includes('^.*$');
+            const versionRule = settings.rules.includes('^prod-v[0-9]+\\.[0-9]+\\.[0-9]+$');
+            const shaRule = settings.rules.includes('^sha-[0-9a-f]{40}$');
+            if (!allTags && !(versionRule && shaRule)) {
+              throw Error('Use all-tag immutability or the documented exact production and SHA rules');
+            }
+          }
+          
+          function resolveVersion(env, deps = {}) {
+            const gradle = deps.execFileSync || execFileSync;
+            const fs = deps.fs || require('node:fs');
+            let output;
+            try {
+              output = gradle('./gradlew', ['properties', '-q'], {encoding: 'utf8'});
+            } catch {
+              throw Error('Gradle version resolution failed');
+            }
+            const matches = [...output.matchAll(/^version:\s*(.+)$/gm)];
+            if (matches.length !== 1) throw Error('Cannot resolve root Gradle version');
+            const release = version(matches[0][1]);
+            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\n`);
+            return release;
+          }
+          
+          async function hub(path, token, request) {
+            const response = await request(`https://hub.docker.com/v2/${path}`, {
+              headers: {Authorization: `Bearer ${token}`},
+              signal: AbortSignal.timeout(30000),
+            });
+            if (response.status === 404) return null;
+            if (!response.ok) throw Error(`Docker Hub request failed (${response.status})`);
+            return response.json();
+          }
+          
+          function command(name, args) {
+            try {
+              execFileSync(name, args, {stdio: 'ignore'});
+            } catch {
+              throw Error('Docker command failed');
+            }
+          }
+          
+          async function publish(env, deps = {}) {
+            validateInputs(env);
+            validatePublishSecrets(env);
+            validateDeploymentSecrets(env);
+            const request = deps.fetch || fetch;
+            const run = deps.cmd || command;
+            const login = deps.spawnSync || spawnSync;
+            const fs = deps.fs || require('node:fs');
+            const release = version(required(env, 'RELEASE_VERSION'));
+            const sha = env.GITHUB_SHA;
+            const namespace = env.DOCKERHUB_NAMESPACE;
+            const repository = env.IMAGE_NAME;
+            const image = `${namespace}/${repository}`;
+            const versionTag = `prod-v${release}`;
+            const shaTag = `sha-${sha}`;
+          
+            const auth = await request('https://hub.docker.com/v2/auth/token', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({identifier: namespace, secret: env.DOCKERHUB_PUSH_TOKEN}),
+              signal: AbortSignal.timeout(30000),
+            });
+            if (!auth.ok) throw Error(`Docker Hub authentication failed (${auth.status})`);
+            const token = (await auth.json()).access_token;
+            if (!token) throw Error('Docker Hub token missing');
+          
+            const info = await hub(`namespaces/${namespace}/repositories/${repository}`, token, request);
+            immutableTagsRequired(info, [versionTag, shaTag]);
+            const readDigest = async (tag) => {
+              const tagInfo = await hub(`namespaces/${namespace}/repositories/${repository}/tags/${tag}`, token, request);
+              return tagInfo ? tagInfo.digest : null;
+            };
+          
+            let versionDigest = await readDigest(versionTag);
+            let shaDigest = await readDigest(shaTag);
+            const state = collision(versionDigest, shaDigest);
+            let digest;
+            if (state === 'reuse') {
+              digest = versionDigest;
+            } else {
+              const loginResult = login('docker', ['login', '--username', namespace, '--password-stdin'], {
+                input: env.DOCKERHUB_PUSH_TOKEN,
+                stdio: ['pipe', 'ignore', 'pipe'],
+              });
+              if (loginResult.status !== 0) throw Error('Docker login failed');
+              if (await readDigest(versionTag) !== null || await readDigest(shaTag) !== null) throw Error('Tag appeared before publication');
+          
+              const metadataFile = `${env.RUNNER_TEMP}/build-metadata.json`;
+              run('docker', [
+                'buildx', 'build', '--push',
+                '--platform', env.PLATFORM,
+                '--file', env.DOCKERFILE,
+                '--tag', `${image}:${versionTag}`,
+                '--tag', `${image}:${shaTag}`,
+                '--label', `org.opencontainers.image.revision=${sha}`,
+                '--label', `org.opencontainers.image.source=${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}`,
+                '--label', `org.opencontainers.image.version=${release}`,
+                '--metadata-file', metadataFile,
+                '.',
+              ]);
+              let metadata;
+              try {
+                metadata = JSON.parse(fs.readFileSync(metadataFile, 'utf8'));
+              } catch {
+                throw Error('Buildx metadata unavailable');
+              }
+              digest = metadata['containerimage.digest'];
+              if (!/^sha256:[a-f0-9]{64}$/.test(digest || '')) throw Error('Buildx digest unavailable');
+              versionDigest = await readDigest(versionTag);
+              shaDigest = await readDigest(shaTag);
+              if (versionDigest !== digest || shaDigest !== digest) throw Error('Registry digest does not match Buildx output');
+            }
+          
+            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\n`);
+            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${env.COMPOSE_SERVICE}\n\nVersion: ${release}\n\nCommit: ${sha}\n\nDigest: ${digest}\n`);
+          }
+          
+          module.exports = {collision, immutableTagsRequired, publish, resolveVersion, validateDeploymentSecrets, validateInputs, validatePublishSecrets, version};
+          
+          if (require.main === module || process.argv[1] === '-') {
+            const mode = process.argv[2];
+            Promise.resolve()
+              .then(() => {
+                if (mode === 'validate-inputs') return validateInputs(process.env);
+                if (mode === 'resolve-version') return resolveVersion(process.env);
+                if (mode === 'publish') return publish(process.env);
+                throw Error('Invalid mode');
+              })
+              .catch((error) => {
+                console.error(error.message);
+                process.exitCode = 1;
+              });
+          }
+          RELEASE_SCRIPT
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate inputs
+        env:
+          PROFILE: ${{ inputs.service-profile }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+        run: |
+          set -Eeuo pipefail
+          case "$PROFILE" in
+            base|auth-mysql|community-redis|batch) ;;
+            *) echo 'Invalid service profile'; exit 1 ;;
+          esac
+          [[ $COMPOSE_FILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$ && $COMPOSE_FILE != *..* ]] || { echo 'Invalid Compose path'; exit 1; }
+          [[ $DOCKERFILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*$ && $DOCKERFILE != *..* ]] || { echo 'Invalid Dockerfile path'; exit 1; }
+          [[ $IMAGE_NAME =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]] || { echo 'Invalid image name'; exit 1; }
+          [[ -f $COMPOSE_FILE ]] || { echo 'Compose file does not exist'; exit 1; }
+          [[ -f $DOCKERFILE ]] || { echo 'Dockerfile does not exist'; exit 1; }
+  version-policy:
+    needs: validate
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Require an unused production version
+        env:
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+        run: |
+          node <<'NODE'
+          'use strict';
+          const {execFileSync} = require('node:child_process');
+          const required = (name) => {
+            const value = process.env[name];
+            if (!value || !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(value)) throw Error(`Invalid ${name}`);
+            return value;
+          };
+          (async () => {
+            const namespace = required('DOCKERHUB_NAMESPACE');
+            const repository = required('IMAGE_NAME');
+            const output = execFileSync('./gradlew', ['properties', '-q'], {encoding: 'utf8'});
+            const matches = [...output.matchAll(/^version:\s*(.+)$/gm)];
+            if (matches.length !== 1) throw Error('Cannot resolve root Gradle version');
+            const version = matches[0][1].trim().replace(/-SNAPSHOT$/, '');
+            if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw Error('Invalid Gradle version');
+            const base = `https://hub.docker.com/v2/namespaces/${namespace}/repositories/${repository}`;
+            const repositoryResponse = await fetch(base, {signal: AbortSignal.timeout(30000)});
+            if (!repositoryResponse.ok) throw Error(`Docker Hub repository lookup failed (${repositoryResponse.status})`);
+            const info = await repositoryResponse.json();
+            if (info.is_private !== false) throw Error('Public Docker Hub repository required');
+            const tagResponse = await fetch(`${base}/tags/prod-v${version}`, {signal: AbortSignal.timeout(30000)});
+            if (tagResponse.status === 404) return;
+            if (!tagResponse.ok) throw Error(`Docker Hub tag lookup failed (${tagResponse.status})`);
+            throw Error(`prod-v${version} already exists; increment the Gradle version before merging`);
+          })().catch((error) => {
+            console.error(error.message);
+            process.exitCode = 1;
+          });
+          NODE
+  auth-mysql:
+    needs: validate
+    if: inputs.service-profile == 'auth-mysql'
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0.42
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-nickname-test-only
+          MYSQL_DATABASE: auth
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=synthetic-nickname-test-only"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+      token-migration-mysql:
+        image: mysql:8.0.42
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-token-migration-only
+          MYSQL_DATABASE: auth
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=synthetic-token-migration-only"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+      flyway-main-mysql:
+        image: mysql:8.0.42
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-flyway-only
+          MYSQL_DATABASE: devnogi
+        ports:
+          - 3308:3306
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=synthetic-flyway-only"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+      flyway-fresh-mysql:
+        image: mysql:8.0.42
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-flyway-only
+          MYSQL_DATABASE: auth
+        ports:
+          - 3309:3306
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=synthetic-flyway-only"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - run: chmod +x gradlew
+      - run: ./gradlew verify --no-daemon
+      - name: Verify refresh token schema upgrade on isolated MySQL 8.0.42
+        run: ./gradlew test --tests '*RefreshTokenMigrationMySqlTest' --rerun-tasks --no-daemon
+        env:
+          TOKEN_MIGRATION_MYSQL_URL: jdbc:mysql://127.0.0.1:3307/auth?useSSL=false&allowPublicKeyRetrieval=true
+          TOKEN_MIGRATION_MYSQL_USER: root
+          TOKEN_MIGRATION_MYSQL_PASSWORD: synthetic-token-migration-only
+          TOKEN_MIGRATION_MYSQL_REQUIRED: 'true'
+      - name: Verify exact main Flyway history and fresh auth baseline on isolated MySQL 8.0.42
+        run: ./gradlew test --tests '*MainHistoryCompatibilityMySqlTest' --rerun-tasks --no-daemon
+        env:
+          FLYWAY_MAIN_MYSQL_URL: jdbc:mysql://127.0.0.1:3308/devnogi?useSSL=false&allowPublicKeyRetrieval=true
+          FLYWAY_FRESH_MYSQL_URL: jdbc:mysql://127.0.0.1:3309/auth?useSSL=false&allowPublicKeyRetrieval=true
+          FLYWAY_MYSQL_USER: root
+          FLYWAY_MYSQL_PASSWORD: synthetic-flyway-only
+          FLYWAY_MYSQL_REQUIRED: 'true'
+      - name: Verify nickname migration on MySQL 8.0.42
+        run: ./gradlew test --tests '*NicknameMigrationMySqlTest' --rerun-tasks --no-daemon
+        env:
+          NICKNAME_MYSQL_URL: jdbc:mysql://127.0.0.1:3306/auth?useSSL=false&allowPublicKeyRetrieval=true
+          NICKNAME_MYSQL_USER: root
+          NICKNAME_MYSQL_PASSWORD: synthetic-nickname-test-only
+          NICKNAME_MYSQL_REQUIRED: 'true'
+      - name: Verify nickname and game identity concurrency on MySQL 8.0.42
+        run: ./gradlew test --tests '*NicknameConcurrencyMySqlTest' --rerun-tasks --no-daemon
+        env:
+          NICKNAME_MYSQL_URL: jdbc:mysql://127.0.0.1:3306/auth?useSSL=false&allowPublicKeyRetrieval=true
+          NICKNAME_MYSQL_USER: root
+          NICKNAME_MYSQL_PASSWORD: synthetic-nickname-test-only
+          NICKNAME_MYSQL_REQUIRED: 'true'
+      - name: Verify single-use game proof and token issuance races on MySQL 8.0.42
+        run: ./gradlew test --tests '*UserVerificationConcurrencyMySqlTest' --rerun-tasks --no-daemon
+        env:
+          NICKNAME_MYSQL_URL: jdbc:mysql://127.0.0.1:3306/auth?useSSL=false&allowPublicKeyRetrieval=true
+          NICKNAME_MYSQL_USER: root
+          NICKNAME_MYSQL_PASSWORD: synthetic-nickname-test-only
+          NICKNAME_MYSQL_REQUIRED: 'true'
+      - name: Verify OAuth exchange migration and one-time proof on MySQL 8.0.42
+        run: ./gradlew test --tests '*OAuthExchangeMySqlTest' --tests '*SocialSignupProofMySqlTest' --rerun-tasks --no-daemon
+        env:
+          NICKNAME_MYSQL_URL: jdbc:mysql://127.0.0.1:3306/auth?useSSL=false&allowPublicKeyRetrieval=true
+          NICKNAME_MYSQL_USER: root
+          NICKNAME_MYSQL_PASSWORD: synthetic-nickname-test-only
+          NICKNAME_MYSQL_REQUIRED: 'true'
+      - name: Verify refresh rotation and failure history on MySQL 8.0.42
+        run: ./gradlew test --tests '*RefreshTokenRotationMySqlTest' --tests '*RefreshTokenLengthMySqlTest' --tests '*ConcurrentLoginMySqlTest' --tests '*UserVerificationFailureHistoryMySqlTest' --tests '*LoginLockoutMySqlTest' --rerun-tasks --no-daemon
+        env:
+          NICKNAME_MYSQL_URL: jdbc:mysql://127.0.0.1:3306/auth?useSSL=false&allowPublicKeyRetrieval=true
+          NICKNAME_MYSQL_USER: root
+          NICKNAME_MYSQL_PASSWORD: synthetic-nickname-test-only
+          NICKNAME_MYSQL_REQUIRED: 'true'
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: auth-test-reports
+          path: |
+            build/reports/tests/
+            build/test-results/
+            build/reports/jacoco/
+          if-no-files-found: ignore
+  verify:
+    needs: validate
+    if: inputs.service-profile == 'base' || inputs.service-profile == 'batch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - run: chmod +x gradlew && ./gradlew verify --no-daemon
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: test-reports-${{ inputs.service-profile }}
+          path: |
+            build/reports/tests/
+            build/test-results/
+            build/reports/jacoco/
+          if-no-files-found: ignore
+  community-redis:
+    needs: validate
+    if: inputs.service-profile == 'community-redis'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7.4.9
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - run: chmod +x gradlew && ./gradlew verify --no-daemon
+      - name: Redis integration
+        if: inputs.service-profile == 'community-redis'
+        run: ./gradlew redisIntegrationTest --no-daemon
+        env:
+          TEST_REDIS_HOST: 127.0.0.1
+          TEST_REDIS_PORT: '6379'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: test-reports
+          path: |
+            build/reports/tests/
+            build/test-results/
+            build/reports/jacoco/
+          if-no-files-found: ignore
+  secret-scan:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - run: node scripts/secret-scan.mjs
+  container:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build image without pushing
+        env:
+          DOCKERFILE: ${{ inputs.dockerfile }}
+        run: docker build --file "$DOCKERFILE" --tag local/spring-ci:test .
+      - name: Render production Compose with synthetic values
+        env:
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+        run: |
+          test -f "$COMPOSE_FILE"
+          mkdir -p "$RUNNER_TEMP/compose"
+          cp "$COMPOSE_FILE" "$RUNNER_TEMP/compose/compose.yml"
+          node -e 'const fs=require("fs"); const s=fs.readFileSync(process.env.COMPOSE_FILE,"utf8"); const names=[...s.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)/g)].map(x=>x[1]); fs.writeFileSync(process.env.RUNNER_TEMP+"/synthetic.env", [...new Set(names)].filter(n=>n!=="IMAGE_REF").map(n=>n+"="+(n.endsWith("PORT")?"8080":"synthetic")).join("\n")+"\nIMAGE_REF=example/image@sha256:"+"a".repeat(64)+"\n")'
+          cp "$RUNNER_TEMP/synthetic.env" "$RUNNER_TEMP/compose/.env.prod"
+          docker compose --env-file "$RUNNER_TEMP/synthetic.env" -f "$RUNNER_TEMP/compose/compose.yml" config --quiet
+  publish:
+    needs: [preflight, release-version, validate, auth-mysql, verify, community-redis, secret-scan, container]
+    if: ${{ always() && needs.preflight.result == 'success' && needs.release-version.result == 'success' && needs.validate.result == 'success' && needs.secret-scan.result == 'success' && needs.container.result == 'success' && ((inputs.service-profile == 'auth-mysql' && needs.auth-mysql.result == 'success') || (inputs.service-profile == 'community-redis' && needs.community-redis.result == 'success') || ((inputs.service-profile == 'base' || inputs.service-profile == 'batch') && needs.verify.result == 'success')) }}
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 45
+    concurrency:
+      group: publish-${{ github.repository }}-${{ inputs.image-name }}-${{ needs.release-version.outputs.version }}
+      cancel-in-progress: false
+    outputs:
+      version: ${{ steps.publish.outputs.version }}
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Publish immutable image
+        id: publish
+        env:
+          SERVICE_PROFILE: ${{ inputs.service-profile }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          COMPOSE_SERVICE: ${{ inputs.compose-service }}
+          CONTAINER_NAME: ${{ inputs.container-name }}
+          REMOTE_DIR: ${{ inputs.remote-dir }}
+          HEALTH_URL: ${{ inputs.health-url }}
+          HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
+          PLATFORM: ${{ inputs.platform }}
+          RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
+          DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_NAMESPACE }}
+          DOCKERHUB_PUSH_TOKEN: ${{ secrets.DOCKERHUB_PUSH_TOKEN }}
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+          PROD_SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          PROD_KNOWN_HOSTS: ${{ secrets.PROD_KNOWN_HOSTS }}
+          PROD_ENV_FILE: ${{ secrets.PROD_ENV_FILE }}
+        run: |
+          node - publish <<'RELEASE_SCRIPT'
+          'use strict';
+          
+          const {execFileSync, spawnSync} = require('node:child_process');
+          
+          function required(env, key) {
+            if (!env[key] || !env[key].trim()) throw Error(`Missing ${key}`);
+            return env[key];
+          }
+          
+          function validateInputs(env) {
+            if (env.GITHUB_REF !== 'refs/heads/main' || !['push', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME)) {
+              throw Error('Production requires a main push or dispatch');
+            }
+            if (!/^[a-f0-9]{40}$/.test(required(env, 'GITHUB_SHA'))) throw Error('Invalid commit');
+            if (!/^https:\/\/github\.com$/.test(required(env, 'GITHUB_SERVER_URL'))) throw Error('Invalid GitHub server');
+            if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(required(env, 'GITHUB_REPOSITORY'))) throw Error('Invalid caller repository');
+            if (!['base', 'auth-mysql', 'community-redis', 'batch'].includes(required(env, 'SERVICE_PROFILE'))) throw Error('Invalid profile');
+            if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(required(env, 'IMAGE_NAME'))) throw Error('Invalid image name');
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$/.test(required(env, 'COMPOSE_FILE')) || env.COMPOSE_FILE.includes('..')) throw Error('Invalid compose path');
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(required(env, 'DOCKERFILE')) || env.DOCKERFILE.includes('..')) throw Error('Invalid Dockerfile path');
+            for (const key of ['COMPOSE_SERVICE', 'CONTAINER_NAME']) {
+              if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(required(env, key))) throw Error(`Invalid ${key}`);
+            }
+            if (!/^\/(?:[a-zA-Z0-9_-]+\/)*[a-zA-Z0-9_-]+$/.test(required(env, 'REMOTE_DIR'))) throw Error('Invalid remote directory');
+            if (!/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/[a-zA-Z0-9/_-]*$/.test(required(env, 'HEALTH_URL')) || +new URL(env.HEALTH_URL).port > 65535) throw Error('Invalid health URL');
+            if (!/^[1-9][0-9]{0,2}$/.test(required(env, 'HEALTH_TIMEOUT')) || +env.HEALTH_TIMEOUT > 600) throw Error('Invalid health timeout');
+            if (required(env, 'PLATFORM') !== 'linux/amd64') throw Error('Invalid platform');
+          }
+          
+          function validatePublishSecrets(env) {
+            if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(required(env, 'DOCKERHUB_NAMESPACE'))) throw Error('Invalid Docker Hub namespace');
+            required(env, 'DOCKERHUB_PUSH_TOKEN');
+          }
+          
+          function validateDeploymentSecrets(env) {
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(required(env, 'PROD_HOST'))) throw Error('Invalid production host');
+            if (!/^[a-z_][a-z0-9_-]*$/.test(required(env, 'PROD_USER'))) throw Error('Invalid production user');
+            if (!/^[1-9][0-9]{0,4}$/.test(required(env, 'PROD_SSH_PORT')) || +env.PROD_SSH_PORT > 65535) throw Error('Invalid production SSH port');
+            for (const key of ['PROD_SSH_PRIVATE_KEY', 'PROD_KNOWN_HOSTS', 'PROD_ENV_FILE']) required(env, key);
+            if (/^\s*(?:export\s+)?IMAGE_REF\s*=/m.test(env.PROD_ENV_FILE)) throw Error('PROD_ENV_FILE must not set IMAGE_REF');
+          }
+          
+          function version(value) {
+            const release = value.trim().replace(/-SNAPSHOT$/, '');
+            if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(release)) throw Error('Invalid Gradle version');
+            return release;
+          }
+          
+          function collision(versionDigest, shaDigest) {
+            if (versionDigest === null && shaDigest === null) return 'build';
+            if (versionDigest && shaDigest && versionDigest === shaDigest && /^sha256:[a-f0-9]{64}$/.test(versionDigest)) return 'reuse';
+            throw Error('Conflicting or incomplete existing tags');
+          }
+          
+          function immutableTagsRequired(info, tags) {
+            if (!info || info.is_private !== false) throw Error('Public Docker Hub repository required');
+            const settings = info.immutable_tags_settings;
+            if (!settings || settings.enabled !== true || !Array.isArray(settings.rules)) throw Error('Docker Hub immutable tags are required');
+            if (settings.rules.length === 0) return;
+            if (!Array.isArray(tags) || tags.length !== 2) throw Error('Published tags are required for immutable-rule validation');
+            const [versionTag, shaTag] = tags;
+            if (!/^prod-v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(versionTag) || !/^sha-[a-f0-9]{40}$/.test(shaTag)) {
+              throw Error('Unexpected published tag format');
+            }
+            const allTags = settings.rules.includes('.*') || settings.rules.includes('^.*$');
+            const versionRule = settings.rules.includes('^prod-v[0-9]+\\.[0-9]+\\.[0-9]+$');
+            const shaRule = settings.rules.includes('^sha-[0-9a-f]{40}$');
+            if (!allTags && !(versionRule && shaRule)) {
+              throw Error('Use all-tag immutability or the documented exact production and SHA rules');
+            }
+          }
+          
+          function resolveVersion(env, deps = {}) {
+            const gradle = deps.execFileSync || execFileSync;
+            const fs = deps.fs || require('node:fs');
+            let output;
+            try {
+              output = gradle('./gradlew', ['properties', '-q'], {encoding: 'utf8'});
+            } catch {
+              throw Error('Gradle version resolution failed');
+            }
+            const matches = [...output.matchAll(/^version:\s*(.+)$/gm)];
+            if (matches.length !== 1) throw Error('Cannot resolve root Gradle version');
+            const release = version(matches[0][1]);
+            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\n`);
+            return release;
+          }
+          
+          async function hub(path, token, request) {
+            const response = await request(`https://hub.docker.com/v2/${path}`, {
+              headers: {Authorization: `Bearer ${token}`},
+              signal: AbortSignal.timeout(30000),
+            });
+            if (response.status === 404) return null;
+            if (!response.ok) throw Error(`Docker Hub request failed (${response.status})`);
+            return response.json();
+          }
+          
+          function command(name, args) {
+            try {
+              execFileSync(name, args, {stdio: 'ignore'});
+            } catch {
+              throw Error('Docker command failed');
+            }
+          }
+          
+          async function publish(env, deps = {}) {
+            validateInputs(env);
+            validatePublishSecrets(env);
+            validateDeploymentSecrets(env);
+            const request = deps.fetch || fetch;
+            const run = deps.cmd || command;
+            const login = deps.spawnSync || spawnSync;
+            const fs = deps.fs || require('node:fs');
+            const release = version(required(env, 'RELEASE_VERSION'));
+            const sha = env.GITHUB_SHA;
+            const namespace = env.DOCKERHUB_NAMESPACE;
+            const repository = env.IMAGE_NAME;
+            const image = `${namespace}/${repository}`;
+            const versionTag = `prod-v${release}`;
+            const shaTag = `sha-${sha}`;
+          
+            const auth = await request('https://hub.docker.com/v2/auth/token', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({identifier: namespace, secret: env.DOCKERHUB_PUSH_TOKEN}),
+              signal: AbortSignal.timeout(30000),
+            });
+            if (!auth.ok) throw Error(`Docker Hub authentication failed (${auth.status})`);
+            const token = (await auth.json()).access_token;
+            if (!token) throw Error('Docker Hub token missing');
+          
+            const info = await hub(`namespaces/${namespace}/repositories/${repository}`, token, request);
+            immutableTagsRequired(info, [versionTag, shaTag]);
+            const readDigest = async (tag) => {
+              const tagInfo = await hub(`namespaces/${namespace}/repositories/${repository}/tags/${tag}`, token, request);
+              return tagInfo ? tagInfo.digest : null;
+            };
+          
+            let versionDigest = await readDigest(versionTag);
+            let shaDigest = await readDigest(shaTag);
+            const state = collision(versionDigest, shaDigest);
+            let digest;
+            if (state === 'reuse') {
+              digest = versionDigest;
+            } else {
+              const loginResult = login('docker', ['login', '--username', namespace, '--password-stdin'], {
+                input: env.DOCKERHUB_PUSH_TOKEN,
+                stdio: ['pipe', 'ignore', 'pipe'],
+              });
+              if (loginResult.status !== 0) throw Error('Docker login failed');
+              if (await readDigest(versionTag) !== null || await readDigest(shaTag) !== null) throw Error('Tag appeared before publication');
+          
+              const metadataFile = `${env.RUNNER_TEMP}/build-metadata.json`;
+              run('docker', [
+                'buildx', 'build', '--push',
+                '--platform', env.PLATFORM,
+                '--file', env.DOCKERFILE,
+                '--tag', `${image}:${versionTag}`,
+                '--tag', `${image}:${shaTag}`,
+                '--label', `org.opencontainers.image.revision=${sha}`,
+                '--label', `org.opencontainers.image.source=${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}`,
+                '--label', `org.opencontainers.image.version=${release}`,
+                '--metadata-file', metadataFile,
+                '.',
+              ]);
+              let metadata;
+              try {
+                metadata = JSON.parse(fs.readFileSync(metadataFile, 'utf8'));
+              } catch {
+                throw Error('Buildx metadata unavailable');
+              }
+              digest = metadata['containerimage.digest'];
+              if (!/^sha256:[a-f0-9]{64}$/.test(digest || '')) throw Error('Buildx digest unavailable');
+              versionDigest = await readDigest(versionTag);
+              shaDigest = await readDigest(shaTag);
+              if (versionDigest !== digest || shaDigest !== digest) throw Error('Registry digest does not match Buildx output');
+            }
+          
+            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\n`);
+            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${env.COMPOSE_SERVICE}\n\nVersion: ${release}\n\nCommit: ${sha}\n\nDigest: ${digest}\n`);
+          }
+          
+          module.exports = {collision, immutableTagsRequired, publish, resolveVersion, validateDeploymentSecrets, validateInputs, validatePublishSecrets, version};
+          
+          if (require.main === module || process.argv[1] === '-') {
+            const mode = process.argv[2];
+            Promise.resolve()
+              .then(() => {
+                if (mode === 'validate-inputs') return validateInputs(process.env);
+                if (mode === 'resolve-version') return resolveVersion(process.env);
+                if (mode === 'publish') return publish(process.env);
+                throw Error('Invalid mode');
+              })
+              .catch((error) => {
+                console.error(error.message);
+                process.exitCode = 1;
+              });
+          }
+          RELEASE_SCRIPT
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    concurrency:
+      group: production-${{ github.repository }}-${{ inputs.compose-service }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Deploy and verify or roll back
+        env:
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          COMPOSE_SERVICE: ${{ inputs.compose-service }}
+          CONTAINER_NAME: ${{ inputs.container-name }}
+          REMOTE_DIR: ${{ inputs.remote-dir }}
+          HEALTH_URL: ${{ inputs.health-url }}
+          HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
+          IMAGE_REF: ${{ format('{0}/{1}@{2}', secrets.DOCKERHUB_NAMESPACE, inputs.image-name, needs.publish.outputs.digest) }}
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+          PROD_SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          PROD_KNOWN_HOSTS: ${{ secrets.PROD_KNOWN_HOSTS }}
+          PROD_ENV_FILE: ${{ secrets.PROD_ENV_FILE }}
+        run: |
+          REMOTE_SCRIPT="$RUNNER_TEMP/deploy-remote.sh"
+          export REMOTE_SCRIPT
+          cat > "$REMOTE_SCRIPT" <<'REMOTE_SCRIPT_EOF'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          umask 077
+          
+          dir=$1; service=$2; container=$3; image=$4; url=$5; timeout=$6; run=$7; stage=$8; legacy_compose=$9
+          curl_bin=${DEPLOY_CURL_BIN:-curl}
+          sleep_bin=${DEPLOY_SLEEP_BIN:-sleep}
+          [[ $dir =~ ^/([a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+$ && $service =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || exit 1
+          [[ $container =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ && $image =~ ^[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || exit 1
+          [[ $url =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}/[a-zA-Z0-9/_-]*$ && $timeout =~ ^[1-9][0-9]{0,2}$ && $timeout -le 600 ]] || exit 1
+          [[ $run =~ ^[0-9]+-[0-9]+$ && $stage == "$dir/.candidate-$run" && $legacy_compose =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$ ]] || exit 1
+          trap 'rm -rf "$stage"' EXIT
+          cd "$dir"
+          exec 9>.deploy.lock
+          flock -w 30 9 || exit 1
+          [[ -f "$stage/compose.yml" && -f "$stage/.env.prod" && -f .env.prod ]] || { echo 'Required current or candidate state absent'; exit 1; }
+          
+          if [[ -f compose.yml ]]; then
+            original_compose=compose.yml
+          elif [[ -f $legacy_compose ]]; then
+            original_compose=$legacy_compose
+          else
+            echo 'No existing production Compose file found'
+            exit 1
+          fi
+          
+          previous_image_id=$(docker inspect --format '{{.Image}}' "$container")
+          [[ $previous_image_id =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Running container image ID unavailable'; exit 1; }
+          if grep -Eq '^IMAGE_REF=' "$stage/.env.prod"; then echo 'Candidate environment must not define IMAGE_REF'; exit 1; fi
+          printf '\nIMAGE_REF=%s\n' "$image" >> "$stage/.env.prod"
+          
+          compose_candidate() {
+            IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file "$stage/.env.prod" -f "$stage/compose.yml" "${@:1}"
+          }
+          [[ $(compose_candidate config --images "$service") == "$image" ]] || { echo 'Candidate image mismatch'; exit 1; }
+          
+          health() {
+            local expected_image_id=$1 actual_image_id status deadline=$((SECONDS + timeout))
+            while (( SECONDS < deadline )); do
+              actual_image_id=$(docker inspect --format '{{.Image}}' "$container" 2>/dev/null) || actual_image_id=''
+              status=$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null) || status=''
+              if [[ $actual_image_id == "$expected_image_id" ]]; then
+                if [[ $status == 'true healthy' || $status == 'true none' ]]; then
+                  if "$curl_bin" --fail --silent --show-error --max-time 5 "$url" >/dev/null 2>&1; then return 0; fi
+                fi
+              fi
+              "$sleep_bin" 5
+            done
+            return 1
+          }
+          
+          backup="$dir/.backup-$run"
+          [[ ! -e $backup ]] || exit 1
+          mkdir "$backup"
+          cp "$original_compose" "$backup/compose.original"
+          cp .env.prod "$backup/env.original"
+          printf '%s\n' "$original_compose" > "$backup/compose-name"
+          printf '%s\n' "$previous_image_id" > "$backup/image-id"
+          if [[ $original_compose == compose.yml ]]; then touch "$backup/canonical-existed"; fi
+          cat > "$backup/rollback.override.yml" <<EOF
+          services:
+            $service:
+              image: $previous_image_id
+          EOF
+          printf '%s\n' "$run" > .deploy-marker
+          
+          rollback() {
+            [[ -f .deploy-marker && $(cat .deploy-marker) == "$run" ]] || { echo 'Rollback refused: marker ownership changed'; return 1; }
+            cp "$backup/compose.original" "$original_compose" || return 1
+            cp "$backup/env.original" .env.prod || return 1
+            if [[ ! -f $backup/canonical-existed ]]; then rm -f compose.yml || return 1; fi
+            if ! docker compose --project-directory "$dir" --env-file .env.prod -f "$original_compose" -f "$backup/rollback.override.yml" up -d --no-deps "$service"; then
+              echo 'Rollback service restore failed'
+              return 1
+            fi
+            if ! health "$previous_image_id"; then
+              echo 'Rollback image or health verification failed'
+              return 1
+            fi
+            rm -f .deploy-marker || return 1
+            echo 'Previous service image and health recovered'
+          }
+          
+          handle_failure() {
+            local original_status=$1
+            trap - ERR HUP INT TERM
+            if rollback; then exit "$original_status"; fi
+            echo 'Rollback failed'
+            exit 2
+          }
+          trap 'handle_failure $?' ERR
+          trap 'handle_failure 130' HUP INT TERM
+          
+          compose_candidate pull "$service"
+          candidate_image_id=$(docker image inspect --format '{{.Id}}' "$image")
+          [[ $candidate_image_id =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Candidate image ID unavailable'; false; }
+          cp "$stage/compose.yml" compose.yml
+          cp "$stage/.env.prod" .env.prod
+          IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file .env.prod -f compose.yml up -d --no-deps "$service"
+          health "$candidate_image_id"
+          rm -f .deploy-marker
+          trap - ERR HUP INT TERM
+          printf '%s\n' 'Deployment health verified'
+          REMOTE_SCRIPT_EOF
+          bash <<'DEPLOY_SCRIPT_EOF'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          umask 077
+          
+          [[ $GITHUB_REF == refs/heads/main && ( $GITHUB_EVENT_NAME == push || $GITHUB_EVENT_NAME == workflow_dispatch ) ]] || exit 1
+          [[ $GITHUB_RUN_ID =~ ^[0-9]+$ && $GITHUB_RUN_ATTEMPT =~ ^[0-9]+$ && $IMAGE_REF =~ ^[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || exit 1
+          [[ $COMPOSE_SERVICE =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ && $CONTAINER_NAME =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || exit 1
+          [[ $REMOTE_DIR =~ ^/([a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+$ && $PROD_HOST =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ && $PROD_USER =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 1
+          [[ $HEALTH_URL =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}/[a-zA-Z0-9/_-]*$ && $HEALTH_TIMEOUT =~ ^[1-9][0-9]{0,2}$ && $HEALTH_TIMEOUT -le 600 ]] || exit 1
+          [[ $PROD_SSH_PORT =~ ^[1-9][0-9]{0,4}$ && $PROD_SSH_PORT -le 65535 ]] || exit 1
+          [[ $COMPOSE_FILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$ && $COMPOSE_FILE != *..* && -f $COMPOSE_FILE ]] || exit 1
+          [[ -n $PROD_SSH_PRIVATE_KEY && -n $PROD_KNOWN_HOSTS && -n $PROD_ENV_FILE ]] || exit 1
+          if grep -Eq '^\s*(export\s+)?IMAGE_REF\s*=' <<< "$PROD_ENV_FILE"; then echo 'Invalid environment'; exit 1; fi
+          
+          work=$(mktemp -d "$RUNNER_TEMP/deploy.XXXXXXXX")
+          trap 'rm -rf "$work"' EXIT
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$work/key"
+          printf '%s\n' "$PROD_KNOWN_HOSTS" > "$work/known_hosts"
+          printf '%s\n' "$PROD_ENV_FILE" > "$work/env"
+          chmod 600 "$work/key" "$work/known_hosts" "$work/env"
+          opts=(-i "$work/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$work/known_hosts" -o ConnectTimeout=15)
+          run="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          stage="$REMOTE_DIR/.candidate-$run"
+          legacy_compose=${COMPOSE_FILE##*/}
+          
+          if ! ssh -p "$PROD_SSH_PORT" "${opts[@]}" "$PROD_USER@$PROD_HOST" "mkdir '$stage'" >"$work/ssh.log" 2>&1; then
+            echo 'Could not create deployment candidate'
+            exit 1
+          fi
+          if ! scp -P "$PROD_SSH_PORT" "${opts[@]}" "$COMPOSE_FILE" "$PROD_USER@$PROD_HOST:$stage/compose.yml" >"$work/ssh.log" 2>&1 ||
+             ! scp -P "$PROD_SSH_PORT" "${opts[@]}" "$work/env" "$PROD_USER@$PROD_HOST:$stage/.env.prod" >"$work/ssh.log" 2>&1; then
+            ssh -p "$PROD_SSH_PORT" "${opts[@]}" "$PROD_USER@$PROD_HOST" "rm -rf '$stage'" >"$work/ssh.log" 2>&1 || true
+            echo 'Could not stage deployment candidate'
+            exit 1
+          fi
+          if ! ssh -p "$PROD_SSH_PORT" "${opts[@]}" "$PROD_USER@$PROD_HOST" bash -s -- \
+            "$REMOTE_DIR" "$COMPOSE_SERVICE" "$CONTAINER_NAME" "$IMAGE_REF" "$HEALTH_URL" "$HEALTH_TIMEOUT" "$run" "$stage" "$legacy_compose" \
+            < "$REMOTE_SCRIPT" >"$work/ssh.log" 2>&1; then
+            echo 'Deployment or rollback verification failed'
+            exit 1
+          fi
+          echo 'Deployment health verified'
+          DEPLOY_SCRIPT_EOF
