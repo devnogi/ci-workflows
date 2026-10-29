@@ -80,6 +80,19 @@ function extractValidationSnippet() {
   return ci.slice(run, end).split('\n').map((line) => line.slice(10)).join('\n');
 }
 
+function extractStepRun(workflow, name) {
+  const marker = `      - name: ${name}\n`;
+  const start = workflow.indexOf(marker);
+  assert.notEqual(start, -1, `missing step: ${name}`);
+  const run = workflow.indexOf('        run: |\n', start) + '        run: |\n'.length;
+  const next = workflow.indexOf('\n      - ', run);
+  return workflow.slice(run, next < 0 ? undefined : next).split('\n').map((line) => line.slice(10)).join('\n');
+}
+
+function bashPath(value) {
+  return value.replace(/^([A-Za-z]):/, (_match, drive) => `/${drive.toLowerCase()}`).replaceAll('\\', '/');
+}
+
 test('actual CI validation shell fails closed for bad values and missing files', () => {
   const directory = fs.mkdtempSync(path.join(process.cwd(), 'ci-validation-'));
   const bash = process.platform === 'win32' ? 'C:/Users/user/AppData/Local/Programs/Git/bin/bash.exe' : 'bash';
@@ -92,5 +105,27 @@ test('actual CI validation shell fails closed for bad values and missing files',
     });
     assert.equal(run().status, 0);
     for (const invalid of [{PROFILE: 'other'}, {COMPOSE_FILE: '../compose.yml'}, {DOCKERFILE: 'missing'}, {IMAGE_NAME: 'Bad/Image'}]) assert.notEqual(run(invalid).status, 0);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('synthetic Compose rendering points DEPLOY_ENV_FILE at the staged fixture', () => {
+  const directory = fs.mkdtempSync(path.join(process.cwd(), 'compose-render-'));
+  const runner = path.join(directory, 'runner');
+  const bin = path.join(directory, 'bin');
+  const bash = process.platform === 'win32' ? 'C:/Users/user/AppData/Local/Programs/Git/bin/bash.exe' : 'bash';
+  fs.mkdirSync(runner);
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(directory, 'auth-compose.yml'), 'services:\n  auth:\n    image: ${IMAGE_REF:?IMAGE_REF is required}\n    env_file:\n      - ${DEPLOY_ENV_FILE}\n');
+  const docker = path.join(bin, process.platform === 'win32' ? 'docker' : 'docker');
+  fs.writeFileSync(docker, `#!/usr/bin/env bash\nset -eu\nenv_file=''\ncompose_file=''\nwhile (( $# )); do\n  case "$1" in\n    --env-file) env_file=$2; shift 2;;\n    -f) compose_file=$2; shift 2;;\n    *) shift;;\n  esac\ndone\nfixture=$(sed -n 's/^DEPLOY_ENV_FILE=//p' "$env_file")\n[[ $fixture == '.env.prod' ]]\n[[ -f "$(dirname "$compose_file")/$fixture" ]]\n`);
+  fs.chmodSync(docker, 0o755);
+  try {
+    const result = spawnSync(bash, ['-c', extractStepRun(ci, 'Render production Compose with synthetic values')], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: {...process.env, COMPOSE_FILE: 'auth-compose.yml', RUNNER_TEMP: bashPath(runner), PATH: `${bashPath(bin)}:${process.env.PATH}`},
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(fs.readFileSync(path.join(runner, 'synthetic.env'), 'utf8'), /^DEPLOY_ENV_FILE=\.env\.prod$/m);
   } finally { fs.rmSync(directory, {recursive: true, force: true}); }
 });

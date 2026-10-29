@@ -189,8 +189,12 @@ fi
 test('legacy first deployment restores original Compose, env, image ID, and health', () => {
   const {directory, result} = runLegacyTransition(false);
   try {
-    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}\n${fs.readFileSync(path.join(directory, 'commands.log'), 'utf8')}`);
+    const commands = fs.readFileSync(path.join(directory, 'commands.log'), 'utf8');
+    assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}\n${commands}`);
     assert.match(`${result.stdout}${result.stderr}`, /Previous service image and health recovered/);
+    const serviceUpdates = commands.split('\n').filter((line) => line.startsWith('compose ') && line.includes(' up '));
+    assert.equal(serviceUpdates.length, 2, commands);
+    for (const update of serviceUpdates) assert.match(update, / up -d --pull never --no-deps app$/);
     assert.equal(fs.existsSync(path.join(directory, 'compose.yml')), false);
     assert.match(fs.readFileSync(path.join(directory, 'docker-compose-prod.yml'), 'utf8'), /legacy\/service:prod/);
     assert.equal(fs.readFileSync(path.join(directory, '.env.prod'), 'utf8'), 'LEGACY=value\n');

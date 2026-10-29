@@ -70,7 +70,7 @@ rollback() {
   cp "$backup/compose.original" "$original_compose" || return 1
   cp "$backup/env.original" .env.prod || return 1
   if [[ ! -f $backup/canonical-existed ]]; then rm -f compose.yml || return 1; fi
-  if ! docker compose --project-directory "$dir" --env-file .env.prod -f "$original_compose" -f "$backup/rollback.override.yml" up -d --no-deps "$service"; then
+  if ! docker compose --project-directory "$dir" --env-file .env.prod -f "$original_compose" -f "$backup/rollback.override.yml" up -d --pull never --no-deps "$service"; then
     echo 'Rollback service restore failed'
     return 1
   fi
@@ -98,7 +98,7 @@ candidate_image_id=$(docker image inspect --format '{{.Id}}' "$image")
 [[ $candidate_image_id =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Candidate image ID unavailable'; false; }
 cp "$stage/compose.yml" compose.yml
 cp "$stage/.env.prod" .env.prod
-IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file .env.prod -f compose.yml up -d --no-deps "$service"
+IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file .env.prod -f compose.yml up -d --pull never --no-deps "$service"
 health "$candidate_image_id"
 rm -f .deploy-marker
 trap - ERR HUP INT TERM

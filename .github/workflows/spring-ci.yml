@@ -282,6 +282,6 @@ jobs:
           test -f "$COMPOSE_FILE"
           mkdir -p "$RUNNER_TEMP/compose"
           cp "$COMPOSE_FILE" "$RUNNER_TEMP/compose/compose.yml"
-          node -e 'const fs=require("fs"); const s=fs.readFileSync(process.env.COMPOSE_FILE,"utf8"); const names=[...s.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)/g)].map(x=>x[1]); fs.writeFileSync(process.env.RUNNER_TEMP+"/synthetic.env", [...new Set(names)].filter(n=>n!=="IMAGE_REF").map(n=>n+"="+(n.endsWith("PORT")?"8080":"synthetic")).join("\n")+"\nIMAGE_REF=example/image@sha256:"+"a".repeat(64)+"\n")'
+          node -e 'const fs=require("fs"); const s=fs.readFileSync(process.env.COMPOSE_FILE,"utf8"); const names=[...s.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)/g)].map(x=>x[1]); const value=n=>n==="DEPLOY_ENV_FILE"?".env.prod":n.endsWith("PORT")?"8080":"synthetic"; fs.writeFileSync(process.env.RUNNER_TEMP+"/synthetic.env", [...new Set(names)].filter(n=>n!=="IMAGE_REF").map(n=>n+"="+value(n)).join("\n")+"\nIMAGE_REF=example/image@sha256:"+"a".repeat(64)+"\n")'
           cp "$RUNNER_TEMP/synthetic.env" "$RUNNER_TEMP/compose/.env.prod"
           docker compose --env-file "$RUNNER_TEMP/synthetic.env" -f "$RUNNER_TEMP/compose/compose.yml" config --quiet

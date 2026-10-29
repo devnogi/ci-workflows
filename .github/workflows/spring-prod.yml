@@ -748,7 +748,7 @@ jobs:
           test -f "$COMPOSE_FILE"
           mkdir -p "$RUNNER_TEMP/compose"
           cp "$COMPOSE_FILE" "$RUNNER_TEMP/compose/compose.yml"
-          node -e 'const fs=require("fs"); const s=fs.readFileSync(process.env.COMPOSE_FILE,"utf8"); const names=[...s.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)/g)].map(x=>x[1]); fs.writeFileSync(process.env.RUNNER_TEMP+"/synthetic.env", [...new Set(names)].filter(n=>n!=="IMAGE_REF").map(n=>n+"="+(n.endsWith("PORT")?"8080":"synthetic")).join("\n")+"\nIMAGE_REF=example/image@sha256:"+"a".repeat(64)+"\n")'
+          node -e 'const fs=require("fs"); const s=fs.readFileSync(process.env.COMPOSE_FILE,"utf8"); const names=[...s.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)/g)].map(x=>x[1]); const value=n=>n==="DEPLOY_ENV_FILE"?".env.prod":n.endsWith("PORT")?"8080":"synthetic"; fs.writeFileSync(process.env.RUNNER_TEMP+"/synthetic.env", [...new Set(names)].filter(n=>n!=="IMAGE_REF").map(n=>n+"="+value(n)).join("\n")+"\nIMAGE_REF=example/image@sha256:"+"a".repeat(64)+"\n")'
           cp "$RUNNER_TEMP/synthetic.env" "$RUNNER_TEMP/compose/.env.prod"
           docker compose --env-file "$RUNNER_TEMP/synthetic.env" -f "$RUNNER_TEMP/compose/compose.yml" config --quiet
   publish:
@@ -1097,7 +1097,7 @@ jobs:
             cp "$backup/compose.original" "$original_compose" || return 1
             cp "$backup/env.original" .env.prod || return 1
             if [[ ! -f $backup/canonical-existed ]]; then rm -f compose.yml || return 1; fi
-            if ! docker compose --project-directory "$dir" --env-file .env.prod -f "$original_compose" -f "$backup/rollback.override.yml" up -d --no-deps "$service"; then
+            if ! docker compose --project-directory "$dir" --env-file .env.prod -f "$original_compose" -f "$backup/rollback.override.yml" up -d --pull never --no-deps "$service"; then
               echo 'Rollback service restore failed'
               return 1
             fi
@@ -1125,7 +1125,7 @@ jobs:
           [[ $candidate_image_id =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Candidate image ID unavailable'; false; }
           cp "$stage/compose.yml" compose.yml
           cp "$stage/.env.prod" .env.prod
-          IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file .env.prod -f compose.yml up -d --no-deps "$service"
+          IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file .env.prod -f compose.yml up -d --pull never --no-deps "$service"
           health "$candidate_image_id"
           rm -f .deploy-marker
           trap - ERR HUP INT TERM
