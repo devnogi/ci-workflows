@@ -58,9 +58,11 @@ ${kind === 'node' ? `          PUBLIC_SCRIPT="$RUNNER_TEMP/public-probe.cjs"
 ${indent(publicProbe, 10)}
           PUBLIC_SCRIPT_EOF
 ` : ''}
-          bash <<'DEPLOY_SCRIPT_EOF'
+          DEPLOY_SCRIPT="$RUNNER_TEMP/deploy-local.sh"
+          cat > "$DEPLOY_SCRIPT" <<'DEPLOY_SCRIPT_EOF'
 ${indent(local, 10)}
           DEPLOY_SCRIPT_EOF
+          bash "$DEPLOY_SCRIPT" </dev/null
 `;
 
 const releaseJob = (inputs, kind) => `  release:

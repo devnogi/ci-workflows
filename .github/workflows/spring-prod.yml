@@ -1802,7 +1802,8 @@ jobs:
           printf '%s\n' 'DEPLOY_RESULT=SUCCESS'
           REMOTE_SCRIPT_EOF
 
-          bash <<'DEPLOY_SCRIPT_EOF'
+          DEPLOY_SCRIPT="$RUNNER_TEMP/deploy-local.sh"
+          cat > "$DEPLOY_SCRIPT" <<'DEPLOY_SCRIPT_EOF'
           #!/usr/bin/env bash
           set -Eeuo pipefail
           umask 077
@@ -1921,6 +1922,7 @@ jobs:
           set -e
           report_remote_result "$remote_status" "$work/ssh.log" || exit $?
           DEPLOY_SCRIPT_EOF
+          bash "$DEPLOY_SCRIPT" </dev/null
   release:
     needs: [publish, deploy]
     if: ${{ !cancelled() && needs.publish.result == 'success' && needs.deploy.result == 'success' }}

@@ -1673,7 +1673,8 @@ jobs:
           if (require.main === module) probe({origin: process.env.PUBLIC_ORIGIN, revision: process.env.ARTIFACT_REVISION, timeout: process.env.HEALTH_TIMEOUT}).catch((error) => { console.error(error.message); process.exitCode = 1; });
           PUBLIC_SCRIPT_EOF
 
-          bash <<'DEPLOY_SCRIPT_EOF'
+          DEPLOY_SCRIPT="$RUNNER_TEMP/deploy-local.sh"
+          cat > "$DEPLOY_SCRIPT" <<'DEPLOY_SCRIPT_EOF'
           #!/usr/bin/env bash
           set -Eeuo pipefail
           umask 077
@@ -1792,6 +1793,7 @@ jobs:
           set -e
           report_remote_result "$remote_status" "$work/ssh.log" || exit $?
           DEPLOY_SCRIPT_EOF
+          bash "$DEPLOY_SCRIPT" </dev/null
   release:
     needs: [publish, deploy]
     if: ${{ !cancelled() && needs.publish.result == 'success' && needs.deploy.result == 'success' }}

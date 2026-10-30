@@ -11,6 +11,7 @@ const old = `sha256:${'1'.repeat(64)}`; const candidate = `sha256:${'2'.repeat(6
 const revision = 'a'.repeat(40); const image = `example/service@sha256:${'b'.repeat(64)}`;
 const directories = [];
 after(async () => {
+  for (const dir of directories) fs.writeFileSync(path.join(dir, 'release-watchdog'), '');
   await new Promise((resolve) => setTimeout(resolve, 2000));
   for (const dir of directories) fs.rmSync(dir, {recursive: true, force: true});
 });
@@ -29,7 +30,7 @@ function fixture() {
   executable('flock', '#!/usr/bin/env bash\nexit 0\n');
   executable('setsid', '#!/usr/bin/env bash\nexec "$@"\n');
   executable('curl', '#!/usr/bin/env bash\nprintf 200\n');
-  executable('sleep', '#!/usr/bin/env bash\nif (( $1 > 5 )); then /usr/bin/sleep 1; fi\n');
+  executable('sleep', '#!/usr/bin/env bash\nif (( $1 > 5 )); then while [[ ! -f "$FAKE_WATCHDOG_RELEASE" ]]; do /usr/bin/sleep 0.1; done; fi\n');
   executable('docker', `#!/usr/bin/env bash
 set -eu
 if [[ $1 == inspect ]]; then
@@ -42,7 +43,7 @@ elif [[ $1 == compose ]]; then
   fi
 fi
 `);
-  const env = {...process.env, PATH: `${posix(bin)}:${process.env.PATH}`, FAKE_STATE: posix(path.join(dir, 'state')), DEPLOY_CURL_BIN: posix(path.join(bin, 'curl')), DEPLOY_SLEEP_BIN: posix(path.join(bin, 'sleep'))};
+  const env = {...process.env, PATH: `${posix(bin)}:${process.env.PATH}`, FAKE_STATE: posix(path.join(dir, 'state')), FAKE_WATCHDOG_RELEASE: posix(path.join(dir, 'release-watchdog')), DEPLOY_CURL_BIN: posix(path.join(bin, 'curl')), DEPLOY_SLEEP_BIN: posix(path.join(bin, 'sleep'))};
   const run = (action, overrides = {}) => spawnSync(bash, ['scripts/deploy-react-remote.sh', action, posix(dir), 'app', 'app-prod', image, 'http://127.0.0.1:8080/health', '1', '42-1', posix(stage), 'prod.yml', revision], {cwd: process.cwd(), env: {...env, ...overrides}, encoding: 'utf8'});
   return {dir, run};
 }
@@ -72,10 +73,15 @@ test('marker-owned rollback restores files and image and reports failure distinc
 test('detached watchdog restores an unfinalized activation after caller exits', async () => {
   const f = fixture();
   const activate = f.run('activate'); assert.equal(activate.status, 0, activate.stdout + activate.stderr);
-  await new Promise((resolve) => setTimeout(resolve, 2500));
+  fs.writeFileSync(path.join(f.dir, 'release-watchdog'), '');
+  const deadline = Date.now() + 15000;
+  const watchdogLog = path.join(f.dir, '.backup-42-1', 'watchdog.log');
+  while ((!fs.existsSync(watchdogLog) || !fs.readFileSync(watchdogLog, 'utf8').includes('DEPLOY_RESULT=ROLLED_BACK')) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   assert.equal(fs.existsSync(path.join(f.dir, '.deploy-marker')), false);
   assert.equal(fs.readFileSync(path.join(f.dir, 'state'), 'utf8').trim(), old);
-  assert.match(fs.readFileSync(path.join(f.dir, '.backup-42-1', 'watchdog.log'), 'utf8'), /DEPLOY_RESULT=ROLLED_BACK/);
+  assert.match(fs.readFileSync(watchdogLog, 'utf8'), /DEPLOY_RESULT=ROLLED_BACK/);
 });
 
 test('real flock allows watchdog to recover when a Docker process hangs', {skip: process.platform === 'win32' ? 'real flock requires a Linux host' : false}, () => {
