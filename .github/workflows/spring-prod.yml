@@ -36,8 +36,6 @@ on:
         required: true
       PROD2_HOST_FINGERPRINT:
         required: true
-      PROD2_ENV_FILE:
-        required: true
     outputs:
       version:
         value: ${{ jobs.publish.outputs.version }}

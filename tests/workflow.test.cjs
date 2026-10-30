@@ -73,6 +73,18 @@ test('publish receives every required deployment secret before registry access',
   assert.match(publish, /validateDeploymentSecrets\(env\)/);
 });
 
+test('production environment file is resolved inside environment jobs, not required at the reusable-call boundary', () => {
+  for (const workflow of [production, nodeProduction]) {
+    const callInterface = workflow.slice(workflow.indexOf('    secrets:'), workflow.indexOf('    outputs:'));
+    assert.doesNotMatch(callInterface, /PROD2_ENV_FILE/);
+    const publish = workflow.slice(workflow.indexOf('  publish:'), workflow.indexOf('  deploy:'));
+    assert.match(publish, /PROD2_ENV_FILE: \$\{\{ secrets\.PROD2_ENV_FILE \}\}/);
+  }
+  const deployInterface = deployment.slice(deployment.indexOf('    secrets:'), deployment.indexOf('permissions:'));
+  assert.doesNotMatch(deployInterface, /PROD2_ENV_FILE/);
+  assert.match(deployment, /environment: production[\s\S]*PROD2_ENV_FILE: \$\{\{ secrets\.PROD2_ENV_FILE \}\}/);
+});
+
 test('deployment has strict known hosts and legacy recovery state', () => {
   assert.match(deployment, /environment: production/);
   assert.match(deployment, /StrictHostKeyChecking=yes/);

@@ -8,6 +8,8 @@ const nodeInputs = ['service-name', 'deployment-target', 'dockerfile', 'compose-
 const deployInputs = ['deployment-target', 'compose-file', 'health-timeout', 'image-ref'];
 const secrets = ['DOCKERHUB_PUSH_TOKEN', 'PROD2_HOST', 'PROD2_USER', 'PROD2_SSH_PORT', 'PROD2_SSH_PRIVATE_KEY', 'PROD2_HOST_FINGERPRINT', 'PROD2_ENV_FILE'];
 const deploySecrets = secrets.slice(1);
+const workflowCallSecrets = secrets.filter((name) => name !== 'PROD2_ENV_FILE');
+const deployCallSecrets = deploySecrets.filter((name) => name !== 'PROD2_ENV_FILE');
 const deploymentVariables = {
   COMPOSE_SERVICE: 'PROD2_COMPOSE_SERVICE',
   CONTAINER_NAME: 'PROD2_CONTAINER_NAME',
@@ -80,7 +82,7 @@ on:
     inputs:
 ${inputDefinitions(inputs)}
     secrets:
-${secretDefinitions(secrets)}
+${secretDefinitions(workflowCallSecrets)}
     outputs:
       version:
         value: \${{ jobs.publish.outputs.version }}
@@ -180,7 +182,7 @@ on:
     inputs:
 ${inputDefinitions(deployInputs)}
     secrets:
-${secretDefinitions(deploySecrets)}
+${secretDefinitions(deployCallSecrets)}
 permissions:
   contents: read
 jobs:
