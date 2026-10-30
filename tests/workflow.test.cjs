@@ -116,12 +116,18 @@ test('Node workflow is typed for React and runs the repository quality gates', (
 
 test('GitHub Release is created only after successful digest deployment', () => {
   for (const workflow of [production, nodeProduction]) {
+    const deployJob = workflow.slice(workflow.indexOf('  deploy:'), workflow.indexOf('  release:'));
     const releaseJob = workflow.slice(workflow.indexOf('  release:'));
+    assert.match(deployJob, /needs: publish\n\s+if: \$\{\{ !cancelled\(\) && needs\.publish\.result == 'success' \}\}/);
     assert.match(releaseJob, /needs: \[publish, deploy\]/);
+    assert.match(releaseJob, /if: \$\{\{ !cancelled\(\) && needs\.publish\.result == 'success' && needs\.deploy\.result == 'success' \}\}/);
     assert.match(releaseJob, /permissions:\n\s+contents: write/);
     assert.match(releaseJob, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
     assert.match(releaseJob, /node - github-release/);
     assert.match(releaseJob, /IMAGE_DIGEST: \$\{\{ needs\.publish\.outputs\.digest \}\}/);
+    assert.match(releaseJob, /RELEASE_COMMIT: \$\{\{ needs\.publish\.outputs\.commit \}\}/);
+    const publishJob = workflow.slice(workflow.indexOf('  publish:'), workflow.indexOf('  deploy:'));
+    assert.match(publishJob, /fetch-depth: 0/);
   }
   assert.match(production, /Object\.keys\(serviceProfiles\)\.map/);
   for (const service of ['gateway', 'batch', 'community', 'auth', 'react']) assert.match(production, new RegExp(`\\n\\s+${service}:`));
