@@ -1,0 +1,106 @@
+name: Node verification
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      dockerfile:
+        required: true
+        type: string
+      compose-file:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate inputs
+        env:
+          SERVICE_NAME: ${{ inputs.service-name }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+        run: |
+          set -Eeuo pipefail
+          [[ $SERVICE_NAME == react ]] || { echo 'Invalid service name'; exit 1; }
+          [[ $COMPOSE_FILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$ && $COMPOSE_FILE != *..* ]] || { echo 'Invalid Compose path'; exit 1; }
+          [[ $DOCKERFILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*$ && $DOCKERFILE != *..* ]] || { echo 'Invalid Dockerfile path'; exit 1; }
+          [[ -f $COMPOSE_FILE && -f $DOCKERFILE ]] || { echo 'Required build file missing'; exit 1; }
+  version-policy:
+    needs: validate
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Require an unused production version
+        env:
+          DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
+        run: |
+          node <<'NODE'
+          'use strict';
+          (async () => {
+            const image = process.env.DOCKERHUB_REPOSITORY;
+            if (image !== 'devanted/memonogi') throw Error('Invalid Docker Hub repository');
+            const parsed = require('./package.json');
+            const version = String(parsed.version || '');
+            if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw Error('Invalid package version');
+            const [namespace, repository] = image.split('/');
+            const base = `https://hub.docker.com/v2/namespaces/${namespace}/repositories/${repository}`;
+            const repositoryResponse = await fetch(base, {signal: AbortSignal.timeout(30000)});
+            if (!repositoryResponse.ok) throw Error(`Docker Hub repository lookup failed (${repositoryResponse.status})`);
+            if ((await repositoryResponse.json()).is_private !== false) throw Error('Public Docker Hub repository required');
+            const tag = `react-v${version}`;
+            const tagResponse = await fetch(`${base}/tags/${tag}`, {signal: AbortSignal.timeout(30000)});
+            if (tagResponse.status === 404) return;
+            if (!tagResponse.ok) throw Error(`Docker Hub tag lookup failed (${tagResponse.status})`);
+            throw Error(`${tag} already exists; increment package.json before merging`);
+          })().catch((error) => {
+            console.error(error.message);
+            process.exitCode = 1;
+          });
+          NODE
+  verify:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GATEWAY_URL: http://127.0.0.1:8090
+      API_MOCKING: disabled
+      VERCEL_ENV: development
+      NEXT_TELEMETRY_DISABLED: '1'
+      FORMAT_BASE_REF: refs/remotes/origin/${{ github.base_ref || 'main' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: node scripts/secret-scan.mjs
+      - run: node --test scripts/test-production-workflow.mjs scripts/test-production-rollback.mjs
+      - run: npm run verify
+  container:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build image without pushing
+        env:
+          DOCKERFILE: ${{ inputs.dockerfile }}
+        run: docker build --file "$DOCKERFILE" --tag local/node-ci:test .
+      - name: Render production Compose with synthetic values
+        env:
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+        run: |
+          test -f "$COMPOSE_FILE"
+          mkdir -p "$RUNNER_TEMP/compose"
+          cp "$COMPOSE_FILE" "$RUNNER_TEMP/compose/compose.yml"
+          node -e 'const fs=require("fs"); const s=fs.readFileSync(process.env.COMPOSE_FILE,"utf8"); const refs=[...s.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)([^}]*)\}/g)]; const names=refs.filter(x=>!x[2].startsWith(":-")).map(x=>x[1]); const value=n=>n==="DEPLOY_ENV_FILE"?".env.prod":n.endsWith("PORT")?"8080":"synthetic"; fs.writeFileSync(process.env.RUNNER_TEMP+"/synthetic.env", [...new Set(names)].filter(n=>n!=="IMAGE_REF").map(n=>n+"="+value(n)).join("\n")+"\nIMAGE_REF=example/image@sha256:"+"a".repeat(64)+"\n")'
+          cp "$RUNNER_TEMP/synthetic.env" "$RUNNER_TEMP/compose/.env.prod"
+          docker compose --env-file "$RUNNER_TEMP/synthetic.env" -f "$RUNNER_TEMP/compose/compose.yml" config --quiet

@@ -1,0 +1,7 @@
+{
+  "name": "ci-workflows",
+  "private": true,
+  "scripts": {
+    "verify": "node scripts/generate.cjs --check && node --test tests/*.test.cjs"
+  }
+}

@@ -1,0 +1,245 @@
+name: Deploy immutable Compose service
+on:
+  workflow_call:
+    inputs:
+      deployment-target:
+        required: true
+        type: string
+      compose-file:
+        required: true
+        type: string
+      health-timeout:
+        required: true
+        type: string
+      image-ref:
+        required: true
+        type: string
+    secrets:
+      PROD2_HOST:
+        required: true
+      PROD2_USER:
+        required: true
+      PROD2_SSH_PORT:
+        required: true
+      PROD2_SSH_PRIVATE_KEY:
+        required: true
+      PROD2_HOST_FINGERPRINT:
+        required: true
+      PROD2_ENV_FILE:
+        required: true
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    concurrency:
+      group: production-${{ github.repository }}-compose-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Deploy and verify or roll back
+        env:
+          DEPLOYMENT_TARGET: ${{ inputs.deployment-target }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
+          COMPOSE_SERVICE: ${{ vars.PROD2_COMPOSE_SERVICE }}
+          CONTAINER_NAME: ${{ vars.PROD2_CONTAINER_NAME }}
+          REMOTE_DIR: ${{ vars.PROD2_REMOTE_DIR }}
+          HEALTH_URL: ${{ vars.PROD2_HEALTH_URL }}
+          PROD_COMPOSE_FILE: ${{ vars.PROD2_COMPOSE_FILE }}
+          IMAGE_REF: ${{ inputs.image-ref }}
+          PROD2_HOST: ${{ secrets.PROD2_HOST }}
+          PROD2_USER: ${{ secrets.PROD2_USER }}
+          PROD2_SSH_PORT: ${{ secrets.PROD2_SSH_PORT }}
+          PROD2_SSH_PRIVATE_KEY: ${{ secrets.PROD2_SSH_PRIVATE_KEY }}
+          PROD2_HOST_FINGERPRINT: ${{ secrets.PROD2_HOST_FINGERPRINT }}
+          PROD2_ENV_FILE: ${{ secrets.PROD2_ENV_FILE }}
+        run: |
+          REMOTE_SCRIPT="$RUNNER_TEMP/deploy-remote.sh"
+          export REMOTE_SCRIPT
+          cat > "$REMOTE_SCRIPT" <<'REMOTE_SCRIPT_EOF'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          umask 077
+
+          dir=$1; service=$2; container=$3; image=$4; url=$5; timeout=$6; run=$7; stage=$8; legacy_compose=$9
+          curl_bin=${DEPLOY_CURL_BIN:-curl}
+          sleep_bin=${DEPLOY_SLEEP_BIN:-sleep}
+          [[ $dir =~ ^/([a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+$ && $service =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || exit 1
+          [[ $container =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ && $image =~ ^[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || exit 1
+          [[ $url =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}/[a-zA-Z0-9/_-]*$ && $timeout =~ ^[1-9][0-9]{0,2}$ && $timeout -le 600 ]] || exit 1
+          [[ $run =~ ^[0-9]+-[0-9]+$ && $stage == "$dir/.candidate-$run" && $legacy_compose =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$ ]] || exit 1
+          trap 'rm -rf "$stage"' EXIT
+          cd "$dir"
+          exec 9>.deploy.lock
+          flock -w 30 9 || exit 1
+          [[ -f "$stage/compose.yml" && -f "$stage/.env.prod" && -f .env.prod ]] || { echo 'Required current or candidate state absent'; exit 1; }
+
+          if [[ -f compose.yml ]]; then
+            original_compose=compose.yml
+          elif [[ -f $legacy_compose ]]; then
+            original_compose=$legacy_compose
+          else
+            echo 'No existing production Compose file found'
+            exit 1
+          fi
+
+          previous_image_id=$(docker inspect --format '{{.Image}}' "$container")
+          [[ $previous_image_id =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Running container image ID unavailable'; exit 1; }
+          if grep -Eq '^IMAGE_REF=' "$stage/.env.prod"; then echo 'Candidate environment must not define IMAGE_REF'; exit 1; fi
+          printf '\nIMAGE_REF=%s\n' "$image" >> "$stage/.env.prod"
+
+          compose_candidate() {
+            IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file "$stage/.env.prod" -f "$stage/compose.yml" "${@:1}"
+          }
+          [[ $(compose_candidate config --images "$service") == "$image" ]] || { echo 'Candidate image mismatch'; exit 1; }
+
+          health() {
+            local expected_image_id=$1 actual_image_id status http_code deadline=$((SECONDS + timeout))
+            while (( SECONDS < deadline )); do
+              actual_image_id=$(docker inspect --format '{{.Image}}' "$container" 2>/dev/null) || actual_image_id=''
+              status=$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null) || status=''
+              if [[ $actual_image_id == "$expected_image_id" ]]; then
+                if [[ $status == 'true healthy' || $status == 'true none' ]]; then
+                  http_code=$("$curl_bin" --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 5 "$url" 2>/dev/null) || http_code=''
+                  if [[ $http_code == '200' ]]; then return 0; fi
+                fi
+              fi
+              "$sleep_bin" 5
+            done
+            return 1
+          }
+
+          backup="$dir/.backup-$run"
+          [[ ! -e $backup ]] || exit 1
+          mkdir "$backup"
+          cp "$original_compose" "$backup/compose.original"
+          cp .env.prod "$backup/env.original"
+          printf '%s\n' "$original_compose" > "$backup/compose-name"
+          printf '%s\n' "$previous_image_id" > "$backup/image-id"
+          if [[ $original_compose == compose.yml ]]; then touch "$backup/canonical-existed"; fi
+          cat > "$backup/rollback.override.yml" <<EOF
+          services:
+            $service:
+              image: $previous_image_id
+          EOF
+          printf '%s\n' "$run" > .deploy-marker
+
+          rollback() {
+            [[ -f .deploy-marker && $(cat .deploy-marker) == "$run" ]] || { echo 'Rollback refused: marker ownership changed'; return 1; }
+            cp "$backup/compose.original" "$original_compose" || return 1
+            cp "$backup/env.original" .env.prod || return 1
+            if [[ ! -f $backup/canonical-existed ]]; then rm -f compose.yml || return 1; fi
+            if ! IMAGE_REF="$previous_image_id" docker compose --project-directory "$dir" --env-file .env.prod -f "$original_compose" -f "$backup/rollback.override.yml" up -d --pull never --no-deps "$service"; then
+              echo 'Rollback service restore failed'
+              return 1
+            fi
+            if ! health "$previous_image_id"; then
+              echo 'Rollback image or health verification failed'
+              return 1
+            fi
+            rm -f .deploy-marker || return 1
+            echo 'Previous service image and health recovered'
+          }
+
+          handle_failure() {
+            local original_status=$1
+            trap - ERR HUP INT TERM
+            if rollback; then echo 'DEPLOY_RESULT=ROLLED_BACK'; exit "$original_status"; fi
+            echo 'Rollback failed'
+            echo 'DEPLOY_RESULT=ROLLBACK_FAILED'
+            exit 2
+          }
+          trap 'handle_failure $?' ERR
+          trap 'handle_failure 130' HUP INT TERM
+
+          compose_candidate pull "$service"
+          candidate_image_id=$(docker image inspect --format '{{.Id}}' "$image")
+          [[ $candidate_image_id =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Candidate image ID unavailable'; false; }
+          cp "$stage/compose.yml" compose.yml
+          cp "$stage/.env.prod" .env.prod
+          IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file .env.prod -f compose.yml up -d --pull never --no-deps "$service"
+          health "$candidate_image_id"
+          rm -f .deploy-marker
+          trap - ERR HUP INT TERM
+          printf '%s\n' 'Deployment health verified'
+          printf '%s\n' 'DEPLOY_RESULT=SUCCESS'
+          REMOTE_SCRIPT_EOF
+          bash <<'DEPLOY_SCRIPT_EOF'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          umask 077
+
+          [[ $GITHUB_REF == refs/heads/main && ( $GITHUB_EVENT_NAME == push || $GITHUB_EVENT_NAME == workflow_dispatch ) ]] || exit 1
+          [[ $DEPLOYMENT_TARGET == prod2 ]] || exit 1
+          case "$GITHUB_REPOSITORY" in
+            devnogi/devnogi-gateway-server|devnogi/open-api-batch-server|devnogi/devnogi-community-server|devnogi/devnogi-auth-server|devnogi/devnogi-react) ;;
+            *) echo 'Invalid deployment caller'; exit 1 ;;
+          esac
+          [[ $GITHUB_RUN_ID =~ ^[0-9]+$ && $GITHUB_RUN_ATTEMPT =~ ^[0-9]+$ && $IMAGE_REF =~ ^[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || exit 1
+          [[ $COMPOSE_SERVICE =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ && $CONTAINER_NAME =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || exit 1
+          [[ $REMOTE_DIR =~ ^/([a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+$ && $PROD2_HOST =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ && $PROD2_USER =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 1
+          [[ $HEALTH_URL =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}/[a-zA-Z0-9/_-]*$ && $HEALTH_TIMEOUT =~ ^[1-9][0-9]{0,2}$ && $HEALTH_TIMEOUT -le 600 ]] || exit 1
+          health_port=${HEALTH_URL#http://127.0.0.1:}
+          health_port=${health_port%%/*}
+          [[ $health_port -le 65535 ]] || exit 1
+          [[ $PROD2_SSH_PORT == 46232 ]] || exit 1
+          [[ $COMPOSE_FILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$ && $COMPOSE_FILE != *..* && -f $COMPOSE_FILE ]] || exit 1
+          [[ $PROD_COMPOSE_FILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$ ]] || exit 1
+          [[ -n $PROD2_SSH_PRIVATE_KEY && -n $PROD2_ENV_FILE && $PROD2_HOST_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$ ]] || exit 1
+          if grep -Eq '^\s*(export\s+)?IMAGE_REF\s*=' <<< "$PROD2_ENV_FILE"; then echo 'Invalid environment'; exit 1; fi
+
+          work=$(mktemp -d "$RUNNER_TEMP/deploy.XXXXXXXX")
+          trap 'rm -rf "$work"' EXIT
+          if ! ssh-keyscan -T 15 -p "$PROD2_SSH_PORT" -t ed25519 "$PROD2_HOST" >"$work/known_hosts" 2>"$work/scan.log" ||
+             ! awk 'NF != 3 || $2 != "ssh-ed25519" { bad=1 } END { exit (bad || NR != 1) }' "$work/known_hosts"; then
+            echo 'Host key scan failed'; exit 1
+          fi
+          fingerprint=$(ssh-keygen -E sha256 -lf "$work/known_hosts" 2>"$work/scan.log") || { echo 'Host key validation failed'; exit 1; }
+          [[ $fingerprint == "256 $PROD2_HOST_FINGERPRINT "*' (ED25519)' ]] || { echo 'Host key validation failed'; exit 1; }
+          printf '%s\n' "$PROD2_SSH_PRIVATE_KEY" > "$work/key"
+          printf '%s\n' "$PROD2_ENV_FILE" > "$work/env"
+          chmod 600 "$work/key" "$work/known_hosts" "$work/env"
+          opts=(-i "$work/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$work/known_hosts" -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=15)
+          run="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          stage="$REMOTE_DIR/.candidate-$run"
+          legacy_compose=$PROD_COMPOSE_FILE
+
+          report_remote_result() {
+            local status=$1 log=$2
+            if [[ $status -eq 0 ]] && grep -qx 'DEPLOY_RESULT=SUCCESS' "$log"; then
+              echo 'Deployment health verified'
+              return 0
+            fi
+            if grep -qx 'DEPLOY_RESULT=ROLLBACK_FAILED' "$log"; then
+              echo 'Deployment failed and rollback verification failed'
+              return 2
+            fi
+            if grep -qx 'DEPLOY_RESULT=ROLLED_BACK' "$log"; then
+              echo 'Deployment failed; previous service image and health were restored'
+              return 1
+            fi
+            echo 'Deployment failed before a verified recovery result was received'
+            return 1
+          }
+
+          if ! ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" "mkdir '$stage'" >"$work/ssh.log" 2>&1; then
+            echo 'Could not create deployment candidate'
+            exit 1
+          fi
+          if ! scp -P "$PROD2_SSH_PORT" "${opts[@]}" "$COMPOSE_FILE" "$PROD2_USER@$PROD2_HOST:$stage/compose.yml" >"$work/ssh.log" 2>&1 ||
+             ! scp -P "$PROD2_SSH_PORT" "${opts[@]}" "$work/env" "$PROD2_USER@$PROD2_HOST:$stage/.env.prod" >"$work/ssh.log" 2>&1; then
+            ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" "rm -rf '$stage'" >"$work/ssh.log" 2>&1 || true
+            echo 'Could not stage deployment candidate'
+            exit 1
+          fi
+          set +e
+          ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" bash -s -- \
+            "$REMOTE_DIR" "$COMPOSE_SERVICE" "$CONTAINER_NAME" "$IMAGE_REF" "$HEALTH_URL" "$HEALTH_TIMEOUT" "$run" "$stage" "$legacy_compose" \
+            < "$REMOTE_SCRIPT" >"$work/ssh.log" 2>&1
+          remote_status=$?
+          set -e
+          report_remote_result "$remote_status" "$work/ssh.log" || exit $?
+          DEPLOY_SCRIPT_EOF
