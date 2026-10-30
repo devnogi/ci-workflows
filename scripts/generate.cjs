@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const read = (path) => fs.readFileSync(path, 'utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').trimEnd();
 const indent = (source, count) => source.split('\n').map((line) => line ? `${' '.repeat(count)}${line}` : '').join('\n');
 const springInputs = ['service-profile', 'service-name', 'deployment-target', 'dockerfile', 'compose-file', 'health-timeout', 'platform'];
-const nodeInputs = ['service-name', 'deployment-target', 'dockerfile', 'compose-file', 'health-timeout', 'platform'];
+const nodeInputs = ['service-name', 'deployment-target', 'dockerfile', 'compose-file', 'health-timeout', 'platform', 'public-origin'];
 const deployInputs = ['deployment-target', 'compose-file', 'health-timeout', 'image-ref'];
 const secrets = ['DOCKERHUB_PUSH_TOKEN', 'PROD2_HOST', 'PROD2_USER', 'PROD2_SSH_PORT', 'PROD2_SSH_PRIVATE_KEY', 'PROD2_HOST_FINGERPRINT', 'PROD2_ENV_FILE'];
 const deploySecrets = secrets.slice(1);
@@ -25,10 +25,12 @@ const variableEnvironment = () => Object.entries(deploymentVariables).map(([name
 const release = read('scripts/release.cjs');
 const remote = read('scripts/deploy-remote.sh');
 const local = read('scripts/deploy-local.sh');
+const reactRemote = read('scripts/deploy-react-remote.sh');
+const publicProbe = read('scripts/public-probe.cjs');
 const nodeRun = (mode) => `node - ${mode} <<'RELEASE_SCRIPT'\n${release}\nRELEASE_SCRIPT`;
 const fixedProfile = (kind) => kind === 'node' ? '          SERVICE_PROFILE: react\n' : '';
 
-const deployJob = (integrated) => `  deploy:
+const deployJob = (integrated, kind) => `  deploy:
 ${integrated ? "    needs: publish\n    if: ${{ !cancelled() && needs.publish.result == 'success' }}\n" : ''}    runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
@@ -42,13 +44,20 @@ ${integrated ? "    needs: publish\n    if: ${{ !cancelled() && needs.publish.re
 ${inputEnvironment(deployInputs.filter((name) => name !== 'image-ref'))}
 ${variableEnvironment()}
           IMAGE_REF: ${integrated ? "${{ format('{0}@{1}', vars.DOCKERHUB_REPOSITORY, needs.publish.outputs.digest) }}" : '${{ inputs.image-ref }}'}
+${kind === 'node' ? "          REACT_PUBLIC_MODE: '1'\n          PUBLIC_ORIGIN: ${{ inputs.public-origin }}\n          ARTIFACT_REVISION: ${{ needs.publish.outputs.commit }}\n" : ''}
 ${secretEnvironment(deploySecrets)}
         run: |
           REMOTE_SCRIPT="$RUNNER_TEMP/deploy-remote.sh"
           export REMOTE_SCRIPT
           cat > "$REMOTE_SCRIPT" <<'REMOTE_SCRIPT_EOF'
-${indent(remote, 10)}
+${indent(kind === 'node' ? reactRemote : remote, 10)}
           REMOTE_SCRIPT_EOF
+${kind === 'node' ? `          PUBLIC_SCRIPT="$RUNNER_TEMP/public-probe.cjs"
+          export PUBLIC_SCRIPT
+          cat > "$PUBLIC_SCRIPT" <<'PUBLIC_SCRIPT_EOF'
+${indent(publicProbe, 10)}
+          PUBLIC_SCRIPT_EOF
+` : ''}
           bash <<'DEPLOY_SCRIPT_EOF'
 ${indent(local, 10)}
           DEPLOY_SCRIPT_EOF
@@ -141,7 +150,7 @@ ${variableEnvironment()}
 ${secretEnvironment(secrets)}
         run: |
 ${indent(nodeRun('publish'), 10)}
-${deployJob(true)}${releaseJob(inputs, kind)}`;
+${deployJob(true, kind)}${releaseJob(inputs, kind)}`;
 };
 
 const spring = workflow({

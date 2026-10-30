@@ -37,6 +37,7 @@ function validateInputs(env) {
   if (required(env, 'DEPLOYMENT_TARGET') !== 'prod2') throw Error('Invalid deployment target');
   if (!Object.hasOwn(serviceProfiles, service) || serviceProfiles[service] !== profile) throw Error('Invalid service profile mapping');
   if (serviceRepositories[service] !== env.GITHUB_REPOSITORY) throw Error('Caller repository does not match service');
+  if (service === 'react' && required(env, 'PUBLIC_ORIGIN') !== 'https://www.memonogi.com') throw Error('Invalid public origin');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$/.test(required(env, 'COMPOSE_FILE')) || env.COMPOSE_FILE.includes('..')) throw Error('Invalid compose path');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(required(env, 'DOCKERFILE')) || env.DOCKERFILE.includes('..')) throw Error('Invalid Dockerfile path');
   if (!/^[1-9][0-9]{0,2}$/.test(required(env, 'HEALTH_TIMEOUT')) || +env.HEALTH_TIMEOUT > 600) throw Error('Invalid health timeout');
@@ -66,6 +67,7 @@ function validateDeploymentSecrets(env) {
   if (!/^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$/.test(required(env, 'PROD2_HOST_FINGERPRINT'))) throw Error('Invalid production fingerprint');
   for (const key of ['PROD2_SSH_PRIVATE_KEY', 'PROD2_ENV_FILE']) required(env, key);
   if (/^\s*(?:export\s+)?IMAGE_REF\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set IMAGE_REF');
+  if (env.SERVICE_NAME === 'react' && /^\s*(?:export\s+)?APP_REVISION\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set APP_REVISION');
 }
 
 function version(value, allowSnapshot = true) {
@@ -277,6 +279,7 @@ async function publish(env, deps = {}) {
       '--label', `org.opencontainers.image.revision=${sha}`,
       '--label', `org.opencontainers.image.source=${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}`,
       '--label', `org.opencontainers.image.version=${release}`,
+      ...(service === 'react' ? ['--build-arg', `APP_REVISION=${sha}`] : []),
       '--metadata-file', metadataFile,
       '.',
     ]);
