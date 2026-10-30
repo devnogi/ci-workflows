@@ -75,15 +75,15 @@ test('version, collision, and immutable-tag requirements fail closed', () => {
   assert.throws(() => release.collision('bad'));
   const tags = ['gateway-v1.2.3'];
   const exactRules = ['gateway', 'batch', 'community', 'auth', 'react'].map((service) => `^${service}-v[0-9]+\\.[0-9]+\\.[0-9]+$`);
-  assert.doesNotThrow(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: exactRules}}, tags));
-  assert.doesNotThrow(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: ['^.*$']}}, tags));
-  assert.doesNotThrow(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: []}}, tags));
-  assert.throws(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: exactRules.slice(0, 4)}}, tags));
-  assert.throws(() => release.immutableTagsRequired({is_private: false, immutable_tags_settings: {enabled: true, rules: ['^gateway-v.*$']}}, tags));
+  assert.doesNotThrow(() => release.immutableTagsRequired({is_private: true, immutable_tags_settings: {enabled: true, rules: exactRules}}, tags));
+  assert.doesNotThrow(() => release.immutableTagsRequired({is_private: true, immutable_tags_settings: {enabled: true, rules: ['^.*$']}}, tags));
+  assert.doesNotThrow(() => release.immutableTagsRequired({is_private: true, immutable_tags_settings: {enabled: true, rules: []}}, tags));
+  assert.throws(() => release.immutableTagsRequired({is_private: true, immutable_tags_settings: {enabled: true, rules: exactRules.slice(0, 4)}}, tags));
+  assert.throws(() => release.immutableTagsRequired({is_private: true, immutable_tags_settings: {enabled: true, rules: ['^gateway-v.*$']}}, tags));
   for (const info of [
-    {is_private: true, immutable_tags_settings: {enabled: true, rules: []}},
-    {is_private: false, immutable_tags_settings: {enabled: false, rules: exactRules}},
-    {is_private: false, immutable_tags_settings: {enabled: true, rules: ['gateway-v.*']}},
+    {is_private: false, immutable_tags_settings: {enabled: true, rules: []}},
+    {is_private: true, immutable_tags_settings: {enabled: false, rules: exactRules}},
+    {is_private: true, immutable_tags_settings: {enabled: true, rules: ['gateway-v.*']}},
   ]) assert.throws(() => release.immutableTagsRequired(info, tags));
 });
 
@@ -105,7 +105,7 @@ test('publication uses one Buildx push, OCI labels, metadata digest, and registr
     },
     fetch: async (url) => {
       if (url.endsWith('/auth/token')) return {ok: true, json: async () => ({access_token: 'token'})};
-      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: false, immutable_tags_settings: {enabled: true, rules: []}})};
+      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: true, immutable_tags_settings: {enabled: true, rules: []}})};
       return published ? {ok: true, json: async () => ({digest})} : {ok: false, status: 404};
     },
   };
@@ -141,7 +141,7 @@ test('existing immutable tag is reusable only for the same commit and version la
     },
     fetch: async (url) => {
       if (url.endsWith('/auth/token')) return {ok: true, json: async () => ({access_token: 'token'})};
-      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: false, immutable_tags_settings: {enabled: true, rules: []}})};
+      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: true, immutable_tags_settings: {enabled: true, rules: []}})};
       return {ok: true, json: async () => ({digest})};
     },
   };
@@ -161,7 +161,7 @@ test('existing immutable tag is not reusable when its OCI source is another repo
     },
     fetch: async (url) => {
       if (url.endsWith('/auth/token')) return {ok: true, json: async () => ({access_token: 'token'})};
-      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: false, immutable_tags_settings: {enabled: true, rules: []}})};
+      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: true, immutable_tags_settings: {enabled: true, rules: []}})};
       return {ok: true, json: async () => ({digest})};
     },
   };
@@ -175,7 +175,7 @@ test('registry digest mismatch rejects the published result', async () => {
     spawnSync() { return {status: 0}; }, cmd() { published = true; },
     fetch: async (url) => {
       if (url.endsWith('/auth/token')) return {ok: true, json: async () => ({access_token: 'token'})};
-      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: false, immutable_tags_settings: {enabled: true, rules: []}})};
+      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: true, immutable_tags_settings: {enabled: true, rules: []}})};
       return published ? {ok: true, json: async () => ({digest: `sha256:${'c'.repeat(64)}`})} : {ok: false, status: 404};
     },
   };

@@ -81,7 +81,7 @@ function collision(versionDigest) {
 }
 
 function immutableTagsRequired(info, tags) {
-  if (!info || info.is_private !== false) throw Error('Public Docker Hub repository required');
+  if (!info || info.is_private !== true) throw Error('Private Docker Hub repository required');
   const settings = info.immutable_tags_settings;
   if (!settings || settings.enabled !== true || !Array.isArray(settings.rules)) throw Error('Docker Hub immutable tags are required');
   if (settings.rules.length === 0) return;

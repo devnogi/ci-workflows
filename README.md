@@ -1,6 +1,6 @@
 # Reusable CI and production deployment
 
-These private reusable workflows execute in the calling repository. Every caller must pin a reviewed full `ci-workflows` commit SHA. Configuring this repository alone does not enable a service workflow or production deployment.
+These public reusable workflows execute in the calling repository. Every caller must pin a reviewed full `ci-workflows` commit SHA. Configuring this repository alone does not enable a service workflow or production deployment.
 
 ## Interfaces
 
@@ -27,7 +27,7 @@ Define organization secret `DOCKERHUB_PUSH_TOKEN` with Docker Hub Read/Write per
 
 Spring versions come only from `./gradlew properties -q`; a trailing `-SNAPSHOT` is removed. React comes only from `package.json`. Every production version must be numeric `MAJOR.MINOR.PATCH`.
 
-All five services publish to the single public image repository `devanted/memonogi` with exactly one immutable tag:
+All five services publish to the single private image repository `devanted/memonogi` with exactly one immutable tag:
 
 - `gateway-v<version>`
 - `batch-v<version>`
@@ -39,7 +39,9 @@ There is no mutable `latest`, `prod`, or commit-SHA alias. A new image is built 
 
 After deployment and health verification, the workflow creates a GitHub Release in the calling service repository using the same tag and release name. Its body records the service, version, commit, image repository, and digest. A retry accepts an existing release only when its tag target, name, body, draft/prerelease flags, version, commit, and digest all match. A mismatch fails without updating the existing tag or release.
 
-Docker Hub tag immutability is mandatory. The workflow accepts all-tag immutability or the complete exact RE2 rule set:
+Main PR CI checks the corresponding GitHub tag and Release without receiving Docker Hub credentials. The authenticated production publish step performs the authoritative private-registry collision check before any build or push. This prevents a same-repository PR from gaining access to the Read/Write Docker Hub token.
+
+Docker Hub tag immutability is mandatory. The workflow requires the repository to remain private and accepts all-tag immutability or the complete exact RE2 rule set:
 
 - `^gateway-v[0-9]+\.[0-9]+\.[0-9]+$`
 - `^batch-v[0-9]+\.[0-9]+\.[0-9]+$`
@@ -57,4 +59,4 @@ Before authentication, the workflow scans a single Ed25519 host key, checks its 
 
 ## Development
 
-The generated production workflows embed the scripts from `scripts/` so they can run in the caller repository without checking out this private repository. After changing a script or reusable CI workflow, run `node scripts/generate.cjs`, then `npm run verify`. Also run `actionlint` and Bash syntax checks when available. Docker builds, registry access, SSH, GitHub Release creation, and live service integration require their respective external environments and are not exercised by the offline test suite.
+The generated production workflows embed the scripts from `scripts/` so they can run in the caller repository without checking out this repository. After changing a script or reusable CI workflow, run `node scripts/generate.cjs`, then `npm run verify`. Also run `actionlint` and Bash syntax checks when available. Docker builds, registry access, SSH, GitHub Release creation, and live service integration require their respective external environments and are not exercised by the offline test suite.
