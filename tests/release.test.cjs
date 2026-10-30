@@ -128,6 +128,22 @@ test('publication uses one Buildx push, OCI labels, metadata digest, and registr
   assert.deepEqual(calls[0], ['pull', 'devanted/memonogi:gateway-v1.2.3']);
 });
 
+test('React publication passes the immutable artifact revision as a build argument', async () => {
+  let args; let published = false;
+  const react = {...env, SERVICE_NAME: 'react', SERVICE_PROFILE: 'react', GITHUB_REPOSITORY: 'devnogi/devnogi-react', PUBLIC_ORIGIN: 'https://www.memonogi.com', RUNNER_TEMP: 'temp', GITHUB_OUTPUT: 'out', GITHUB_STEP_SUMMARY: 'summary'};
+  await release.publish(react, {
+    fs: {appendFileSync() {}, readFileSync() { return JSON.stringify({'containerimage.digest': digest}); }},
+    spawnSync() { return {status: 0}; }, cmd(_name, value) { args = value; published = true; },
+    fetch: async (url) => {
+      if (url.endsWith('/auth/token')) return {ok: true, json: async () => ({access_token: 'token'})};
+      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: true, immutable_tags_settings: {enabled: true, rules: []}})};
+      return published ? {ok: true, json: async () => ({digest})} : {ok: false, status: 404};
+    },
+  });
+  assert.equal(args[args.indexOf('--build-arg') + 1], `APP_REVISION=${sha}`);
+  assert.throws(() => release.validateDeploymentSecrets({...react, PROD2_ENV_FILE: 'APP_REVISION=forged'}));
+});
+
 test('existing immutable tag rejects a revision that is not an ancestor', async () => {
   const dependencies = {
     fs: {appendFileSync() {}}, spawnSync() { return {status: 0}; }, cmd() {},

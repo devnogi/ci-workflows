@@ -48,6 +48,7 @@ jobs:
           HEALTH_URL: ${{ vars.PROD2_HEALTH_URL }}
           PROD_COMPOSE_FILE: ${{ vars.PROD2_COMPOSE_FILE }}
           IMAGE_REF: ${{ inputs.image-ref }}
+
           PROD2_HOST: ${{ secrets.PROD2_HOST }}
           PROD2_USER: ${{ secrets.PROD2_USER }}
           PROD2_SSH_PORT: ${{ secrets.PROD2_SSH_PORT }}
@@ -165,6 +166,7 @@ jobs:
           printf '%s\n' 'Deployment health verified'
           printf '%s\n' 'DEPLOY_RESULT=SUCCESS'
           REMOTE_SCRIPT_EOF
+
           bash <<'DEPLOY_SCRIPT_EOF'
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -188,6 +190,10 @@ jobs:
           [[ $PROD_COMPOSE_FILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$ ]] || exit 1
           [[ -n $PROD2_SSH_PRIVATE_KEY && -n $PROD2_ENV_FILE && $PROD2_HOST_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$ ]] || exit 1
           if grep -Eq '^\s*(export\s+)?IMAGE_REF\s*=' <<< "$PROD2_ENV_FILE"; then echo 'Invalid environment'; exit 1; fi
+          if [[ ${REACT_PUBLIC_MODE:-0} == 1 ]]; then
+            [[ $GITHUB_REPOSITORY == devnogi/devnogi-react && ${PUBLIC_ORIGIN:-} == 'https://www.memonogi.com' && ${ARTIFACT_REVISION:-} =~ ^[a-f0-9]{40}$ ]] || exit 1
+            if grep -Eq '^\s*(export\s+)?APP_REVISION\s*=' <<< "$PROD2_ENV_FILE"; then echo 'Invalid environment'; exit 1; fi
+          fi
 
           work=$(mktemp -d "$RUNNER_TEMP/deploy.XXXXXXXX")
           trap 'rm -rf "$work"' EXIT
@@ -200,6 +206,13 @@ jobs:
           printf '%s\n' "$PROD2_SSH_PRIVATE_KEY" > "$work/key"
           printf '%s\n' "$PROD2_ENV_FILE" > "$work/env"
           chmod 600 "$work/key" "$work/known_hosts" "$work/env"
+          if [[ ${REACT_PUBLIC_MODE:-0} == 1 ]]; then
+            cp "$COMPOSE_FILE" "$work/compose.yml"
+            cp "$work/env" "$work/.env.prod"
+            if ! IMAGE_REF="$IMAGE_REF" docker compose --project-directory "$work" --env-file "$work/.env.prod" -f "$work/compose.yml" config --format json 2>/dev/null | node -e 'let s=""; process.stdin.on("data", x => s += x); process.stdin.on("end", () => { try { const service = JSON.parse(s).services[process.env.COMPOSE_SERVICE]; if (!service || Object.hasOwn(service.environment || {}, "APP_REVISION")) process.exitCode = 1; } catch { process.exitCode = 1; } });'; then
+              echo 'React Compose configuration must not override APP_REVISION'; exit 1
+            fi
+          fi
           opts=(-i "$work/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$work/known_hosts" -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=15)
           run="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           stage="$REMOTE_DIR/.candidate-$run"
@@ -232,6 +245,38 @@ jobs:
             ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" "rm -rf '$stage'" >"$work/ssh.log" 2>&1 || true
             echo 'Could not stage deployment candidate'
             exit 1
+          fi
+          if [[ ${REACT_PUBLIC_MODE:-0} == 1 ]]; then
+            if ! scp -P "$PROD2_SSH_PORT" "${opts[@]}" "$REMOTE_SCRIPT" "$PROD2_USER@$PROD2_HOST:$stage/remote.sh" >"$work/ssh.log" 2>&1; then
+              ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" "rm -rf '$stage'" >"$work/ssh.log" 2>&1 || true
+              echo 'Could not stage recovery script'; exit 1
+            fi
+            remote_action() {
+              local action=$1
+              ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" bash -s -- \
+                "$action" "$REMOTE_DIR" "$COMPOSE_SERVICE" "$CONTAINER_NAME" "$IMAGE_REF" "$HEALTH_URL" "$HEALTH_TIMEOUT" "$run" "$stage" "$legacy_compose" "$ARTIFACT_REVISION" \
+                < "$REMOTE_SCRIPT" >"$work/ssh.log" 2>&1
+            }
+            recover() {
+              trap - HUP INT TERM
+              if remote_action rollback && grep -qx 'DEPLOY_RESULT=ROLLED_BACK' "$work/ssh.log"; then
+                echo 'Deployment failed; previous service image and health were restored'
+                return 1
+              fi
+              echo 'Deployment failed and rollback verification failed; host watchdog retains recovery ownership'
+              return 2
+            }
+            trap 'recover; exit $?' HUP INT TERM
+            if ! remote_action activate || ! grep -qx 'DEPLOY_RESULT=ACTIVATED' "$work/ssh.log"; then
+              if grep -qx 'DEPLOY_RESULT=ROLLED_BACK' "$work/ssh.log"; then echo 'Deployment failed; previous service restored'; exit 1; fi
+              if grep -qx 'DEPLOY_RESULT=ROLLBACK_FAILED' "$work/ssh.log"; then echo 'Deployment failed and rollback verification failed'; exit 2; fi
+              recover || exit $?
+            fi
+            if ! node "$PUBLIC_SCRIPT"; then recover || exit $?; fi
+            if ! remote_action finalize || ! grep -qx 'DEPLOY_RESULT=SUCCESS' "$work/ssh.log"; then recover || exit $?; fi
+            trap - HUP INT TERM
+            echo 'Public deployment verified and finalized'
+            exit 0
           fi
           set +e
           ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" bash -s -- \

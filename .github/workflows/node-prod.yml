@@ -20,6 +20,9 @@ on:
       platform:
         required: true
         type: string
+      public-origin:
+        required: true
+        type: string
     secrets:
       DOCKERHUB_PUSH_TOKEN:
         required: true
@@ -56,6 +59,7 @@ jobs:
           COMPOSE_FILE: ${{ inputs.compose-file }}
           HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
           PLATFORM: ${{ inputs.platform }}
+          PUBLIC_ORIGIN: ${{ inputs.public-origin }}
           SERVICE_PROFILE: react
         run: |
           node - validate-inputs <<'RELEASE_SCRIPT'
@@ -98,6 +102,7 @@ jobs:
             if (required(env, 'DEPLOYMENT_TARGET') !== 'prod2') throw Error('Invalid deployment target');
             if (!Object.hasOwn(serviceProfiles, service) || serviceProfiles[service] !== profile) throw Error('Invalid service profile mapping');
             if (serviceRepositories[service] !== env.GITHUB_REPOSITORY) throw Error('Caller repository does not match service');
+            if (service === 'react' && required(env, 'PUBLIC_ORIGIN') !== 'https://www.memonogi.com') throw Error('Invalid public origin');
             if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$/.test(required(env, 'COMPOSE_FILE')) || env.COMPOSE_FILE.includes('..')) throw Error('Invalid compose path');
             if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(required(env, 'DOCKERFILE')) || env.DOCKERFILE.includes('..')) throw Error('Invalid Dockerfile path');
             if (!/^[1-9][0-9]{0,2}$/.test(required(env, 'HEALTH_TIMEOUT')) || +env.HEALTH_TIMEOUT > 600) throw Error('Invalid health timeout');
@@ -127,6 +132,7 @@ jobs:
             if (!/^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$/.test(required(env, 'PROD2_HOST_FINGERPRINT'))) throw Error('Invalid production fingerprint');
             for (const key of ['PROD2_SSH_PRIVATE_KEY', 'PROD2_ENV_FILE']) required(env, key);
             if (/^\s*(?:export\s+)?IMAGE_REF\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set IMAGE_REF');
+            if (env.SERVICE_NAME === 'react' && /^\s*(?:export\s+)?APP_REVISION\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set APP_REVISION');
           }
 
           function version(value, allowSnapshot = true) {
@@ -338,6 +344,7 @@ jobs:
                 '--label', `org.opencontainers.image.revision=${sha}`,
                 '--label', `org.opencontainers.image.source=${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}`,
                 '--label', `org.opencontainers.image.version=${release}`,
+                ...(service === 'react' ? ['--build-arg', `APP_REVISION=${sha}`] : []),
                 '--metadata-file', metadataFile,
                 '.',
               ]);
@@ -532,6 +539,7 @@ jobs:
             if (required(env, 'DEPLOYMENT_TARGET') !== 'prod2') throw Error('Invalid deployment target');
             if (!Object.hasOwn(serviceProfiles, service) || serviceProfiles[service] !== profile) throw Error('Invalid service profile mapping');
             if (serviceRepositories[service] !== env.GITHUB_REPOSITORY) throw Error('Caller repository does not match service');
+            if (service === 'react' && required(env, 'PUBLIC_ORIGIN') !== 'https://www.memonogi.com') throw Error('Invalid public origin');
             if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$/.test(required(env, 'COMPOSE_FILE')) || env.COMPOSE_FILE.includes('..')) throw Error('Invalid compose path');
             if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(required(env, 'DOCKERFILE')) || env.DOCKERFILE.includes('..')) throw Error('Invalid Dockerfile path');
             if (!/^[1-9][0-9]{0,2}$/.test(required(env, 'HEALTH_TIMEOUT')) || +env.HEALTH_TIMEOUT > 600) throw Error('Invalid health timeout');
@@ -561,6 +569,7 @@ jobs:
             if (!/^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$/.test(required(env, 'PROD2_HOST_FINGERPRINT'))) throw Error('Invalid production fingerprint');
             for (const key of ['PROD2_SSH_PRIVATE_KEY', 'PROD2_ENV_FILE']) required(env, key);
             if (/^\s*(?:export\s+)?IMAGE_REF\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set IMAGE_REF');
+            if (env.SERVICE_NAME === 'react' && /^\s*(?:export\s+)?APP_REVISION\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set APP_REVISION');
           }
 
           function version(value, allowSnapshot = true) {
@@ -772,6 +781,7 @@ jobs:
                 '--label', `org.opencontainers.image.revision=${sha}`,
                 '--label', `org.opencontainers.image.source=${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}`,
                 '--label', `org.opencontainers.image.version=${release}`,
+                ...(service === 'react' ? ['--build-arg', `APP_REVISION=${sha}`] : []),
                 '--metadata-file', metadataFile,
                 '.',
               ]);
@@ -1031,6 +1041,7 @@ jobs:
           COMPOSE_FILE: ${{ inputs.compose-file }}
           HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
           PLATFORM: ${{ inputs.platform }}
+          PUBLIC_ORIGIN: ${{ inputs.public-origin }}
           SERVICE_PROFILE: react
           RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
           DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
@@ -1088,6 +1099,7 @@ jobs:
             if (required(env, 'DEPLOYMENT_TARGET') !== 'prod2') throw Error('Invalid deployment target');
             if (!Object.hasOwn(serviceProfiles, service) || serviceProfiles[service] !== profile) throw Error('Invalid service profile mapping');
             if (serviceRepositories[service] !== env.GITHUB_REPOSITORY) throw Error('Caller repository does not match service');
+            if (service === 'react' && required(env, 'PUBLIC_ORIGIN') !== 'https://www.memonogi.com') throw Error('Invalid public origin');
             if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$/.test(required(env, 'COMPOSE_FILE')) || env.COMPOSE_FILE.includes('..')) throw Error('Invalid compose path');
             if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(required(env, 'DOCKERFILE')) || env.DOCKERFILE.includes('..')) throw Error('Invalid Dockerfile path');
             if (!/^[1-9][0-9]{0,2}$/.test(required(env, 'HEALTH_TIMEOUT')) || +env.HEALTH_TIMEOUT > 600) throw Error('Invalid health timeout');
@@ -1117,6 +1129,7 @@ jobs:
             if (!/^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$/.test(required(env, 'PROD2_HOST_FINGERPRINT'))) throw Error('Invalid production fingerprint');
             for (const key of ['PROD2_SSH_PRIVATE_KEY', 'PROD2_ENV_FILE']) required(env, key);
             if (/^\s*(?:export\s+)?IMAGE_REF\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set IMAGE_REF');
+            if (env.SERVICE_NAME === 'react' && /^\s*(?:export\s+)?APP_REVISION\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set APP_REVISION');
           }
 
           function version(value, allowSnapshot = true) {
@@ -1328,6 +1341,7 @@ jobs:
                 '--label', `org.opencontainers.image.revision=${sha}`,
                 '--label', `org.opencontainers.image.source=${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}`,
                 '--label', `org.opencontainers.image.version=${release}`,
+                ...(service === 'react' ? ['--build-arg', `APP_REVISION=${sha}`] : []),
                 '--metadata-file', metadataFile,
                 '.',
               ]);
@@ -1490,6 +1504,10 @@ jobs:
           HEALTH_URL: ${{ vars.PROD2_HEALTH_URL }}
           PROD_COMPOSE_FILE: ${{ vars.PROD2_COMPOSE_FILE }}
           IMAGE_REF: ${{ format('{0}@{1}', vars.DOCKERHUB_REPOSITORY, needs.publish.outputs.digest) }}
+          REACT_PUBLIC_MODE: '1'
+          PUBLIC_ORIGIN: ${{ inputs.public-origin }}
+          ARTIFACT_REVISION: ${{ needs.publish.outputs.commit }}
+
           PROD2_HOST: ${{ secrets.PROD2_HOST }}
           PROD2_USER: ${{ secrets.PROD2_USER }}
           PROD2_SSH_PORT: ${{ secrets.PROD2_SSH_PORT }}
@@ -1504,109 +1522,157 @@ jobs:
           set -Eeuo pipefail
           umask 077
 
-          dir=$1; service=$2; container=$3; image=$4; url=$5; timeout=$6; run=$7; stage=$8; legacy_compose=$9
-          curl_bin=${DEPLOY_CURL_BIN:-curl}
-          sleep_bin=${DEPLOY_SLEEP_BIN:-sleep}
-          [[ $dir =~ ^/([a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+$ && $service =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || exit 1
-          [[ $container =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ && $image =~ ^[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] || exit 1
+          action=$1; dir=$2; service=$3; container=$4; image=$5; url=$6; timeout=$7; run=$8; stage=$9; legacy_compose=${10}; revision=${11}
+          curl_bin=${DEPLOY_CURL_BIN:-curl}; sleep_bin=${DEPLOY_SLEEP_BIN:-sleep}
+          [[ $action == activate || $action == activate-guarded || $action == finalize || $action == finalize-guarded || $action == rollback || $action == rollback-guarded || $action == watchdog ]] || exit 1
+          [[ $dir =~ ^/([a-zA-Z0-9_-]+/)*[a-zA-Z0-9_-]+$ && $service =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ && $container =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || exit 1
+          [[ $image =~ ^[a-z0-9._/-]+@sha256:[a-f0-9]{64}$ && $revision =~ ^[a-f0-9]{40}$ ]] || exit 1
           [[ $url =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}/[a-zA-Z0-9/_-]*$ && $timeout =~ ^[1-9][0-9]{0,2}$ && $timeout -le 600 ]] || exit 1
           [[ $run =~ ^[0-9]+-[0-9]+$ && $stage == "$dir/.candidate-$run" && $legacy_compose =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$ ]] || exit 1
-          trap 'rm -rf "$stage"' EXIT
+          backup="$dir/.backup-$run"
+          # Every operation that can own the lock runs in a bounded process group. Its
+          # wrapper remains outside that group so it can report a killed rollback.
+          if [[ $action == activate || $action == finalize || $action == rollback ]]; then
+            script="$backup/remote.sh"
+            [[ $action != activate ]] || script="$stage/remote.sh"
+            [[ -f $script ]] || { [[ $action != rollback ]] || echo 'DEPLOY_RESULT=ROLLBACK_FAILED'; exit 2; }
+            set +e
+            timeout --signal=KILL "$((timeout * 2 + 60))s" bash "$script" "$action-guarded" "$dir" "$service" "$container" "$image" "$url" "$timeout" "$run" "$stage" "$legacy_compose" "$revision"
+            result=$?
+            set -e
+            if [[ $result == 124 || $result == 137 ]]; then
+              if [[ $action == rollback ]]; then echo 'DEPLOY_RESULT=ROLLBACK_FAILED'; exit 2; fi
+              echo 'DEPLOY_RESULT=ACTION_TIMEOUT'; exit 1
+            fi
+            exit "$result"
+          fi
+          if [[ $action == watchdog ]]; then
+            [[ -d $backup ]] || exit 1
+            : > "$backup/watchdog-ready"
+            "$sleep_bin" "$((timeout * 2 + 90))"
+            exec bash "$backup/remote.sh" rollback "$dir" "$service" "$container" "$image" "$url" "$timeout" "$run" "$stage" "$legacy_compose" "$revision"
+          fi
           cd "$dir"
           exec 9>.deploy.lock
-          flock -w 30 9 || exit 1
-          [[ -f "$stage/compose.yml" && -f "$stage/.env.prod" && -f .env.prod ]] || { echo 'Required current or candidate state absent'; exit 1; }
-
-          if [[ -f compose.yml ]]; then
-            original_compose=compose.yml
-          elif [[ -f $legacy_compose ]]; then
-            original_compose=$legacy_compose
-          else
-            echo 'No existing production Compose file found'
-            exit 1
-          fi
-
-          previous_image_id=$(docker inspect --format '{{.Image}}' "$container")
-          [[ $previous_image_id =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Running container image ID unavailable'; exit 1; }
-          if grep -Eq '^IMAGE_REF=' "$stage/.env.prod"; then echo 'Candidate environment must not define IMAGE_REF'; exit 1; fi
-          printf '\nIMAGE_REF=%s\n' "$image" >> "$stage/.env.prod"
-
-          compose_candidate() {
-            IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file "$stage/.env.prod" -f "$stage/compose.yml" "${@:1}"
-          }
-          [[ $(compose_candidate config --images "$service") == "$image" ]] || { echo 'Candidate image mismatch'; exit 1; }
+          if [[ ${DEPLOY_WATCHDOG:-} == 1 ]]; then flock 9; else flock -w 30 9 || { echo 'DEPLOY_RESULT=LOCK_FAILED'; exit 2; }; fi
 
           health() {
-            local expected_image_id=$1 actual_image_id status http_code deadline=$((SECONDS + timeout))
+            local expected=$1 actual status code deadline=$((SECONDS + timeout))
             while (( SECONDS < deadline )); do
-              actual_image_id=$(docker inspect --format '{{.Image}}' "$container" 2>/dev/null) || actual_image_id=''
-              status=$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null) || status=''
-              if [[ $actual_image_id == "$expected_image_id" ]]; then
-                if [[ $status == 'true healthy' || $status == 'true none' ]]; then
-                  http_code=$("$curl_bin" --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 5 "$url" 2>/dev/null) || http_code=''
-                  if [[ $http_code == '200' ]]; then return 0; fi
-                fi
+              actual=$(docker inspect --format '{{.Image}}' "$container" 9>&- 2>/dev/null) || actual=''
+              status=$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 9>&- 2>/dev/null) || status=''
+              if [[ $actual == "$expected" && ( $status == 'true healthy' || $status == 'true none' ) ]]; then
+                code=$("$curl_bin" --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 5 "$url" 2>/dev/null) || code=''
+                [[ $code == 200 ]] && return 0
               fi
               "$sleep_bin" 5
             done
             return 1
           }
-
-          backup="$dir/.backup-$run"
-          [[ ! -e $backup ]] || exit 1
-          mkdir "$backup"
-          cp "$original_compose" "$backup/compose.original"
-          cp .env.prod "$backup/env.original"
-          printf '%s\n' "$original_compose" > "$backup/compose-name"
-          printf '%s\n' "$previous_image_id" > "$backup/image-id"
-          if [[ $original_compose == compose.yml ]]; then touch "$backup/canonical-existed"; fi
-          cat > "$backup/rollback.override.yml" <<EOF
-          services:
-            $service:
-              image: $previous_image_id
-          EOF
-          printf '%s\n' "$run" > .deploy-marker
-
+          owned() { [[ -f .deploy-marker && $(<.deploy-marker) == "$run" && -f $backup/image-id && -f $backup/compose-name ]]; }
           rollback() {
-            [[ -f .deploy-marker && $(cat .deploy-marker) == "$run" ]] || { echo 'Rollback refused: marker ownership changed'; return 1; }
-            cp "$backup/compose.original" "$original_compose" || return 1
-            cp "$backup/env.original" .env.prod || return 1
+            owned || { echo 'Rollback refused: marker ownership changed'; return 1; }
+            local original previous
+            original=$(<"$backup/compose-name"); previous=$(<"$backup/image-id")
+            [[ $original =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$ && $previous =~ ^sha256:[a-f0-9]{64}$ ]] || return 1
+            cp "$backup/compose.original" "$original" && cp "$backup/env.original" .env.prod || return 1
             if [[ ! -f $backup/canonical-existed ]]; then rm -f compose.yml || return 1; fi
-            if ! IMAGE_REF="$previous_image_id" docker compose --project-directory "$dir" --env-file .env.prod -f "$original_compose" -f "$backup/rollback.override.yml" up -d --pull never --no-deps "$service"; then
-              echo 'Rollback service restore failed'
-              return 1
-            fi
-            if ! health "$previous_image_id"; then
-              echo 'Rollback image or health verification failed'
-              return 1
-            fi
+            IMAGE_REF="$previous" docker compose --project-directory "$dir" --env-file .env.prod -f "$original" -f "$backup/rollback.override.yml" up -d --pull never --no-deps "$service" 9>&- || return 1
+            health "$previous" || return 1
             rm -f .deploy-marker || return 1
-            echo 'Previous service image and health recovered'
+            echo 'DEPLOY_RESULT=ROLLED_BACK'
           }
 
-          handle_failure() {
-            local original_status=$1
-            trap - ERR HUP INT TERM
-            if rollback; then echo 'DEPLOY_RESULT=ROLLED_BACK'; exit "$original_status"; fi
-            echo 'Rollback failed'
-            echo 'DEPLOY_RESULT=ROLLBACK_FAILED'
-            exit 2
-          }
-          trap 'handle_failure $?' ERR
-          trap 'handle_failure 130' HUP INT TERM
+          if [[ $action == rollback-guarded ]]; then
+            if [[ ! -f .deploy-marker && ${DEPLOY_WATCHDOG:-} == 1 ]]; then exit 0; fi
+            if rollback; then exit 0; else echo 'DEPLOY_RESULT=ROLLBACK_FAILED'; exit 2; fi
+          fi
+          if [[ $action == finalize-guarded ]]; then
+            owned || { echo 'DEPLOY_RESULT=MARKER_CONFLICT'; exit 1; }
+            expected=$(<"$backup/candidate-image-id")
+            health "$expected" || { echo 'DEPLOY_RESULT=FINALIZE_FAILED'; exit 1; }
+            rm -f .deploy-marker
+            echo 'DEPLOY_RESULT=SUCCESS'
+            exit 0
+          fi
 
+          trap 'rm -rf "$stage"' EXIT
+          [[ ! -e .deploy-marker && ! -e $backup && -f "$stage/compose.yml" && -f "$stage/.env.prod" && -f "$stage/remote.sh" && -f .env.prod ]] || { echo 'Required state absent or deployment already pending'; exit 1; }
+          if [[ -f compose.yml ]]; then original=compose.yml; elif [[ -f $legacy_compose ]]; then original=$legacy_compose; else exit 1; fi
+          previous=$(docker inspect --format '{{.Image}}' "$container" 9>&-)
+          [[ $previous =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
+          if grep -Eq '^\s*(export\s+)?(IMAGE_REF|APP_REVISION)\s*=' "$stage/.env.prod"; then echo 'Candidate environment contains reserved value'; exit 1; fi
+          printf '\nIMAGE_REF=%s\n' "$image" >> "$stage/.env.prod"
+          compose_candidate() { IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file "$stage/.env.prod" -f "$stage/compose.yml" "$@" 9>&-; }
+          [[ $(compose_candidate config --images "$service") == "$image" ]] || exit 1
+          mkdir "$backup"
+          cp "$original" "$backup/compose.original"; cp .env.prod "$backup/env.original"; cp "$stage/remote.sh" "$backup/remote.sh"
+          printf '%s\n' "$original" > "$backup/compose-name"; printf '%s\n' "$previous" > "$backup/image-id"
+          if [[ $original == compose.yml ]]; then touch "$backup/canonical-existed"; fi
+          printf 'services:\n  %s:\n    image: %s\n' "$service" "$previous" > "$backup/rollback.override.yml"
+          # Launch the detached recovery process before creating the marker. It waits for
+          # the public verification deadline and obtains the same lock before recovery.
+          DEPLOY_WATCHDOG=1 setsid nohup bash "$backup/remote.sh" watchdog "$dir" "$service" "$container" "$image" "$url" "$timeout" "$run" "$stage" "$legacy_compose" "$revision" >"$backup/watchdog.log" 2>&1 </dev/null 9>&- &
+          for ((attempt=0; attempt<50; attempt++)); do
+            [[ -f $backup/watchdog-ready ]] && break
+            sleep 0.1
+          done
+          [[ -f $backup/watchdog-ready ]] || { echo 'Recovery watchdog did not start'; exit 1; }
+          printf '%s\n' "$run" > .deploy-marker
+          failure() { trap - ERR HUP INT TERM; if rollback; then exit 1; else echo 'DEPLOY_RESULT=ROLLBACK_FAILED'; exit 2; fi; }
+          trap failure ERR HUP INT TERM
           compose_candidate pull "$service"
-          candidate_image_id=$(docker image inspect --format '{{.Id}}' "$image")
-          [[ $candidate_image_id =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Candidate image ID unavailable'; false; }
-          cp "$stage/compose.yml" compose.yml
-          cp "$stage/.env.prod" .env.prod
-          IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file .env.prod -f compose.yml up -d --pull never --no-deps "$service"
-          health "$candidate_image_id"
-          rm -f .deploy-marker
+          candidate=$(docker image inspect --format '{{.Id}}' "$image" 9>&-)
+          label=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image" 9>&-)
+          image_revision=$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" 9>&- | sed -n 's/^APP_REVISION=//p')
+          [[ $candidate =~ ^sha256:[a-f0-9]{64}$ && $label == "$revision" && $image_revision == "$revision" ]]
+          printf '%s\n' "$candidate" > "$backup/candidate-image-id"
+          cp "$stage/compose.yml" compose.yml; cp "$stage/.env.prod" .env.prod
+          IMAGE_REF="$image" docker compose --project-directory "$dir" --env-file .env.prod -f compose.yml up -d --pull never --no-deps "$service" 9>&-
+          container_revision=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 9>&- | sed -n 's/^APP_REVISION=//p')
+          [[ $container_revision == "$revision" ]]
+          health "$candidate"
           trap - ERR HUP INT TERM
-          printf '%s\n' 'Deployment health verified'
-          printf '%s\n' 'DEPLOY_RESULT=SUCCESS'
+          echo 'DEPLOY_RESULT=ACTIVATED'
           REMOTE_SCRIPT_EOF
+          PUBLIC_SCRIPT="$RUNNER_TEMP/public-probe.cjs"
+          export PUBLIC_SCRIPT
+          cat > "$PUBLIC_SCRIPT" <<'PUBLIC_SCRIPT_EOF'
+          'use strict';
+
+          const ORIGIN = 'https://www.memonogi.com';
+          const routes = [
+            ['/api/health', (body, revision) => { const data = JSON.parse(body); return data.service === 'devnogi-react' && data.revision === revision; }],
+            ['/', (body) => /<h1\b[^>]*>\s*마비노기 경매장·시세·아이템 정보\s*<\/h1>/.test(body)],
+            ['/auction-history', (body) => /<h1\b[^>]*>\s*마비노기 경매장 거래내역·아이템 시세 검색\s*<\/h1>/.test(body)],
+            ['/sitemap.xml', (body) => ['/', '/auction-history', '/community'].every((path) => body.includes(`<loc>${ORIGIN}${path}</loc>`))],
+            ['/robots.txt', (body) => body.includes(`Sitemap: ${ORIGIN}/sitemap.xml`)],
+          ];
+
+          async function probe({origin, revision, timeout, request = fetch, now = Date.now, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))}) {
+            if (origin !== ORIGIN || !/^[a-f0-9]{40}$/.test(revision) || !/^[1-9][0-9]{0,2}$/.test(String(timeout)) || +timeout > 600) throw Error('Invalid public probe inputs');
+            const deadline = now() + timeout * 1000;
+            while (now() < deadline) {
+              let passed = true;
+              for (const [path, check] of routes) {
+                const remaining = deadline - now();
+                if (remaining <= 0) { passed = false; break; }
+                try {
+                  const response = await request(`${origin}${path}`, {redirect: 'manual', cache: 'no-store', signal: AbortSignal.timeout(Math.min(5000, remaining))});
+                  if (response.status !== 200 || !check(await response.text(), revision)) { passed = false; break; }
+                } catch { passed = false; break; }
+              }
+              if (passed) return;
+              const remaining = deadline - now();
+              if (remaining > 0) await wait(Math.min(5000, remaining));
+            }
+            throw Error('Public verification failed or timed out');
+          }
+
+          module.exports = {probe, routes};
+          if (require.main === module) probe({origin: process.env.PUBLIC_ORIGIN, revision: process.env.ARTIFACT_REVISION, timeout: process.env.HEALTH_TIMEOUT}).catch((error) => { console.error(error.message); process.exitCode = 1; });
+          PUBLIC_SCRIPT_EOF
+
           bash <<'DEPLOY_SCRIPT_EOF'
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -1630,6 +1696,10 @@ jobs:
           [[ $PROD_COMPOSE_FILE =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$ ]] || exit 1
           [[ -n $PROD2_SSH_PRIVATE_KEY && -n $PROD2_ENV_FILE && $PROD2_HOST_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$ ]] || exit 1
           if grep -Eq '^\s*(export\s+)?IMAGE_REF\s*=' <<< "$PROD2_ENV_FILE"; then echo 'Invalid environment'; exit 1; fi
+          if [[ ${REACT_PUBLIC_MODE:-0} == 1 ]]; then
+            [[ $GITHUB_REPOSITORY == devnogi/devnogi-react && ${PUBLIC_ORIGIN:-} == 'https://www.memonogi.com' && ${ARTIFACT_REVISION:-} =~ ^[a-f0-9]{40}$ ]] || exit 1
+            if grep -Eq '^\s*(export\s+)?APP_REVISION\s*=' <<< "$PROD2_ENV_FILE"; then echo 'Invalid environment'; exit 1; fi
+          fi
 
           work=$(mktemp -d "$RUNNER_TEMP/deploy.XXXXXXXX")
           trap 'rm -rf "$work"' EXIT
@@ -1642,6 +1712,13 @@ jobs:
           printf '%s\n' "$PROD2_SSH_PRIVATE_KEY" > "$work/key"
           printf '%s\n' "$PROD2_ENV_FILE" > "$work/env"
           chmod 600 "$work/key" "$work/known_hosts" "$work/env"
+          if [[ ${REACT_PUBLIC_MODE:-0} == 1 ]]; then
+            cp "$COMPOSE_FILE" "$work/compose.yml"
+            cp "$work/env" "$work/.env.prod"
+            if ! IMAGE_REF="$IMAGE_REF" docker compose --project-directory "$work" --env-file "$work/.env.prod" -f "$work/compose.yml" config --format json 2>/dev/null | node -e 'let s=""; process.stdin.on("data", x => s += x); process.stdin.on("end", () => { try { const service = JSON.parse(s).services[process.env.COMPOSE_SERVICE]; if (!service || Object.hasOwn(service.environment || {}, "APP_REVISION")) process.exitCode = 1; } catch { process.exitCode = 1; } });'; then
+              echo 'React Compose configuration must not override APP_REVISION'; exit 1
+            fi
+          fi
           opts=(-i "$work/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$work/known_hosts" -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=15)
           run="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           stage="$REMOTE_DIR/.candidate-$run"
@@ -1675,6 +1752,38 @@ jobs:
             echo 'Could not stage deployment candidate'
             exit 1
           fi
+          if [[ ${REACT_PUBLIC_MODE:-0} == 1 ]]; then
+            if ! scp -P "$PROD2_SSH_PORT" "${opts[@]}" "$REMOTE_SCRIPT" "$PROD2_USER@$PROD2_HOST:$stage/remote.sh" >"$work/ssh.log" 2>&1; then
+              ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" "rm -rf '$stage'" >"$work/ssh.log" 2>&1 || true
+              echo 'Could not stage recovery script'; exit 1
+            fi
+            remote_action() {
+              local action=$1
+              ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" bash -s -- \
+                "$action" "$REMOTE_DIR" "$COMPOSE_SERVICE" "$CONTAINER_NAME" "$IMAGE_REF" "$HEALTH_URL" "$HEALTH_TIMEOUT" "$run" "$stage" "$legacy_compose" "$ARTIFACT_REVISION" \
+                < "$REMOTE_SCRIPT" >"$work/ssh.log" 2>&1
+            }
+            recover() {
+              trap - HUP INT TERM
+              if remote_action rollback && grep -qx 'DEPLOY_RESULT=ROLLED_BACK' "$work/ssh.log"; then
+                echo 'Deployment failed; previous service image and health were restored'
+                return 1
+              fi
+              echo 'Deployment failed and rollback verification failed; host watchdog retains recovery ownership'
+              return 2
+            }
+            trap 'recover; exit $?' HUP INT TERM
+            if ! remote_action activate || ! grep -qx 'DEPLOY_RESULT=ACTIVATED' "$work/ssh.log"; then
+              if grep -qx 'DEPLOY_RESULT=ROLLED_BACK' "$work/ssh.log"; then echo 'Deployment failed; previous service restored'; exit 1; fi
+              if grep -qx 'DEPLOY_RESULT=ROLLBACK_FAILED' "$work/ssh.log"; then echo 'Deployment failed and rollback verification failed'; exit 2; fi
+              recover || exit $?
+            fi
+            if ! node "$PUBLIC_SCRIPT"; then recover || exit $?; fi
+            if ! remote_action finalize || ! grep -qx 'DEPLOY_RESULT=SUCCESS' "$work/ssh.log"; then recover || exit $?; fi
+            trap - HUP INT TERM
+            echo 'Public deployment verified and finalized'
+            exit 0
+          fi
           set +e
           ssh -p "$PROD2_SSH_PORT" "${opts[@]}" "$PROD2_USER@$PROD2_HOST" bash -s -- \
             "$REMOTE_DIR" "$COMPOSE_SERVICE" "$CONTAINER_NAME" "$IMAGE_REF" "$HEALTH_URL" "$HEALTH_TIMEOUT" "$run" "$stage" "$legacy_compose" \
@@ -1699,6 +1808,7 @@ jobs:
           COMPOSE_FILE: ${{ inputs.compose-file }}
           HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
           PLATFORM: ${{ inputs.platform }}
+          PUBLIC_ORIGIN: ${{ inputs.public-origin }}
           SERVICE_PROFILE: react
           RELEASE_VERSION: ${{ needs.publish.outputs.version }}
           RELEASE_COMMIT: ${{ needs.publish.outputs.commit }}
@@ -1746,6 +1856,7 @@ jobs:
             if (required(env, 'DEPLOYMENT_TARGET') !== 'prod2') throw Error('Invalid deployment target');
             if (!Object.hasOwn(serviceProfiles, service) || serviceProfiles[service] !== profile) throw Error('Invalid service profile mapping');
             if (serviceRepositories[service] !== env.GITHUB_REPOSITORY) throw Error('Caller repository does not match service');
+            if (service === 'react' && required(env, 'PUBLIC_ORIGIN') !== 'https://www.memonogi.com') throw Error('Invalid public origin');
             if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*\.ya?ml$/.test(required(env, 'COMPOSE_FILE')) || env.COMPOSE_FILE.includes('..')) throw Error('Invalid compose path');
             if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(required(env, 'DOCKERFILE')) || env.DOCKERFILE.includes('..')) throw Error('Invalid Dockerfile path');
             if (!/^[1-9][0-9]{0,2}$/.test(required(env, 'HEALTH_TIMEOUT')) || +env.HEALTH_TIMEOUT > 600) throw Error('Invalid health timeout');
@@ -1775,6 +1886,7 @@ jobs:
             if (!/^SHA256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$/.test(required(env, 'PROD2_HOST_FINGERPRINT'))) throw Error('Invalid production fingerprint');
             for (const key of ['PROD2_SSH_PRIVATE_KEY', 'PROD2_ENV_FILE']) required(env, key);
             if (/^\s*(?:export\s+)?IMAGE_REF\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set IMAGE_REF');
+            if (env.SERVICE_NAME === 'react' && /^\s*(?:export\s+)?APP_REVISION\s*=/m.test(env.PROD2_ENV_FILE)) throw Error('PROD2_ENV_FILE must not set APP_REVISION');
           }
 
           function version(value, allowSnapshot = true) {
@@ -1986,6 +2098,7 @@ jobs:
                 '--label', `org.opencontainers.image.revision=${sha}`,
                 '--label', `org.opencontainers.image.source=${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}`,
                 '--label', `org.opencontainers.image.version=${release}`,
+                ...(service === 'react' ? ['--build-arg', `APP_REVISION=${sha}`] : []),
                 '--metadata-file', metadataFile,
                 '.',
               ]);

@@ -12,6 +12,8 @@ Every service name is also bound to its exact `devnogi` caller repository. A rep
 
 `spring-prod.yml` and `node-prod.yml` add `health-timeout` and `platform`. The timeout must be 1–600 seconds and the platform must be `linux/amd64`. Both workflows accept only `push` or `workflow_dispatch` on `main`, repeat the appropriate CI gates against the exact deployment commit, publish the image, deploy its immutable digest, verify health and recovery, and create the repository GitHub Release only after deployment succeeds.
 
+`node-prod.yml` additionally requires `public-origin: https://www.memonogi.com` exactly. Its React image receives the artifact commit as the `APP_REVISION` build argument, and `/api/health` must report that revision. Do not set `APP_REVISION` in the production environment or override it in Compose; the deployment compares the image and running container values and OCI revision before finalization.
+
 `compose-deploy.yml` remains separately callable for a pre-verified digest by the five application repositories only; each is fixed to prod2. It reads `PROD2_COMPOSE_SERVICE`, `PROD2_CONTAINER_NAME`, `PROD2_REMOTE_DIR`, `PROD2_HEALTH_URL`, and `PROD2_COMPOSE_FILE` from the caller's `production` Environment. It requires `PROD2_HOST`, `PROD2_USER`, `PROD2_SSH_PORT` (46232), `PROD2_SSH_PRIVATE_KEY`, `PROD2_HOST_FINGERPRINT`, and `PROD2_ENV_FILE`. The fingerprint must be independently authenticated and cross-checked before configuration. The environment file must contain the complete candidate environment without `IMAGE_REF`.
 
 ## Organization configuration
@@ -53,9 +55,11 @@ The workflow validates but never changes Docker Hub repository settings. Publica
 
 ## Deployment and recovery
 
-The production host needs Bash, `flock`, Docker Compose v2, and curl. The SSH user needs Docker access and write access to the configured deployment directory. The candidate Compose target service must use `${IMAGE_REF:?IMAGE_REF is required}`.
+The production host needs Bash, `flock`, `setsid`, GNU `timeout`, Docker Compose v2, and curl. The SSH user needs Docker access and write access to the configured deployment directory. The candidate Compose target service must use `${IMAGE_REF:?IMAGE_REF is required}`.
 
 Before authentication, the workflow scans a single Ed25519 host key, checks its SHA-256 fingerprint against the independently authenticated secret, and uses the matching key in an ephemeral strict OpenSSH host-key file. It removes the runner files on exit. The workflow stages the candidate Compose and `.env.prod`, locks the deployment directory, stores the current Compose, environment, filename, and running image ID, then writes an execution marker. It replaces only the target service using `docker compose up -d --pull never --no-deps`. It verifies the exact image ID, Docker health when present, and the localhost HTTP endpoint. On failure, only the marker owner restores the saved files and image ID and verifies recovery. Rollback failure exits distinctly. Successful deployment removes the marker; timestamped backups remain available to operators.
+
+For React the marker remains in place until the runner directly verifies the public health revision, both SEO headings, sitemap URLs, and robots sitemap declaration with bounded retries. Redirects fail. The host bounds each activation, finalization, and rollback process group to twice the health timeout plus 60 seconds, killing it if a Docker command hangs and releasing its lock. A timed-out rollback reports `ROLLBACK_FAILED` and retains its marker. The detached, marker-owned recovery watchdog starts in a separate session before activation; after twice the health timeout plus 90 seconds it attempts the same bounded rollback if the candidate has not been finalized, even if the runner disappears. The watchdog writes its result to the retained backup's `watchdog.log`; failed rollback leaves the marker for operator investigation. Finalization removes the marker only after confirming ownership and the running image and health. The release job runs only after finalization succeeds.
 
 ## Development
 
