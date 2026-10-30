@@ -6,11 +6,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {spawnSync} = require('node:child_process');
 
-const ci = fs.readFileSync('.github/workflows/spring-ci.yml', 'utf8');
-const production = fs.readFileSync('.github/workflows/spring-prod.yml', 'utf8');
-const nodeCi = fs.readFileSync('.github/workflows/node-ci.yml', 'utf8');
-const nodeProduction = fs.readFileSync('.github/workflows/node-prod.yml', 'utf8');
-const deployment = fs.readFileSync('.github/workflows/compose-deploy.yml', 'utf8');
+const workflow = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+const ci = workflow('.github/workflows/spring-ci.yml');
+const production = workflow('.github/workflows/spring-prod.yml');
+const nodeCi = workflow('.github/workflows/node-ci.yml');
+const nodeProduction = workflow('.github/workflows/node-prod.yml');
+const deployment = workflow('.github/workflows/compose-deploy.yml');
 
 test('all approved profiles and mandatory integration tests are present', () => {
   for (const item of ['gateway:base|auth:auth-mysql|community:community-redis|batch:batch', 'mysql:8.0.42', 'redis:7.4.9', 'redisIntegrationTest', 'RefreshTokenMigrationMySqlTest', 'MainHistoryCompatibilityMySqlTest', 'NicknameMigrationMySqlTest', 'NicknameConcurrencyMySqlTest', 'UserVerificationConcurrencyMySqlTest', 'OAuthExchangeMySqlTest', 'SocialSignupProofMySqlTest', 'RefreshTokenRotationMySqlTest', 'RefreshTokenLengthMySqlTest', 'ConcurrentLoginMySqlTest', 'UserVerificationFailureHistoryMySqlTest', 'LoginLockoutMySqlTest']) assert.ok(ci.includes(item), item);
@@ -80,11 +81,14 @@ test('deployment has strict known hosts and legacy recovery state', () => {
   assert.match(deployment, /ssh-keyscan/);
 });
 
-test('validation checks out the caller and main PRs reject an existing production version', () => {
+test('validation checks out the caller and main PRs reject an existing GitHub release version without registry secrets', () => {
   const validate = ci.match(/  validate:[\s\S]*?\n  version-policy:/)?.[0] || '';
   assert.match(validate, /actions\/checkout@[0-9a-f]{40}/);
   assert.match(ci, /github\.event_name == 'pull_request' && github\.base_ref == 'main'/);
-  assert.match(ci, /vars\.DOCKERHUB_REPOSITORY/);
+  assert.match(ci, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(ci, /git\/ref\/tags\/\$\{tag\}/);
+  assert.match(ci, /releases\/tags\/\$\{tag\}/);
+  assert.doesNotMatch(ci, /secrets\.DOCKERHUB_PUSH_TOKEN/);
   assert.match(ci, /throw Error\(`\$\{tag\} already exists/);
   assert.match(ci, /increment the Gradle version/);
 });

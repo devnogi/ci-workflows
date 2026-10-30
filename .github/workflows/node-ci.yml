@@ -37,26 +37,28 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Require an unused production version
         env:
-          DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           node <<'NODE'
           'use strict';
           (async () => {
-            const image = process.env.DOCKERHUB_REPOSITORY;
-            if (image !== 'devanted/memonogi') throw Error('Invalid Docker Hub repository');
             const parsed = require('./package.json');
             const version = String(parsed.version || '');
             if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw Error('Invalid package version');
-            const [namespace, repository] = image.split('/');
-            const base = `https://hub.docker.com/v2/namespaces/${namespace}/repositories/${repository}`;
-            const repositoryResponse = await fetch(base, {signal: AbortSignal.timeout(30000)});
-            if (!repositoryResponse.ok) throw Error(`Docker Hub repository lookup failed (${repositoryResponse.status})`);
-            if ((await repositoryResponse.json()).is_private !== false) throw Error('Public Docker Hub repository required');
             const tag = `react-v${version}`;
-            const tagResponse = await fetch(`${base}/tags/${tag}`, {signal: AbortSignal.timeout(30000)});
-            if (tagResponse.status === 404) return;
-            if (!tagResponse.ok) throw Error(`Docker Hub tag lookup failed (${tagResponse.status})`);
-            throw Error(`${tag} already exists; increment package.json before merging`);
+            const api = process.env.GITHUB_API_URL;
+            const repository = process.env.GITHUB_REPOSITORY;
+            const token = process.env.GITHUB_TOKEN;
+            if (!api || !repository || !token) throw Error('Missing GitHub version lookup configuration');
+            const headers = {Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`};
+            for (const path of [`git/ref/tags/${tag}`, `releases/tags/${tag}`]) {
+              const response = await fetch(`${api}/repos/${repository}/${path}`, {headers, signal: AbortSignal.timeout(30000)});
+              if (response.status === 404) continue;
+              if (!response.ok) throw Error(`GitHub version lookup failed (${response.status})`);
+              throw Error(`${tag} already exists; increment package.json before merging`);
+            }
           })().catch((error) => {
             console.error(error.message);
             process.exitCode = 1;

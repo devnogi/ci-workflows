@@ -50,8 +50,10 @@ jobs:
           cache: gradle
       - name: Require an unused production version
         env:
-          DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
           SERVICE_NAME: ${{ inputs.service-name }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           node <<'NODE'
           'use strict';
@@ -62,9 +64,6 @@ jobs:
             return value;
           };
           (async () => {
-            const image = required('DOCKERHUB_REPOSITORY');
-            if (image !== 'devanted/memonogi') throw Error('Invalid Docker Hub repository');
-            const [namespace, repository] = image.split('/');
             const service = required('SERVICE_NAME');
             if (!['gateway', 'batch', 'community', 'auth'].includes(service)) throw Error('Invalid service name');
             const output = execFileSync('./gradlew', ['properties', '-q'], {encoding: 'utf8'});
@@ -72,16 +71,17 @@ jobs:
             if (matches.length !== 1) throw Error('Cannot resolve root Gradle version');
             const version = matches[0][1].trim().replace(/-SNAPSHOT$/, '');
             if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw Error('Invalid Gradle version');
-            const base = `https://hub.docker.com/v2/namespaces/${namespace}/repositories/${repository}`;
-            const repositoryResponse = await fetch(base, {signal: AbortSignal.timeout(30000)});
-            if (!repositoryResponse.ok) throw Error(`Docker Hub repository lookup failed (${repositoryResponse.status})`);
-            const info = await repositoryResponse.json();
-            if (info.is_private !== false) throw Error('Public Docker Hub repository required');
             const tag = `${service}-v${version}`;
-            const tagResponse = await fetch(`${base}/tags/${tag}`, {signal: AbortSignal.timeout(30000)});
-            if (tagResponse.status === 404) return;
-            if (!tagResponse.ok) throw Error(`Docker Hub tag lookup failed (${tagResponse.status})`);
-            throw Error(`${tag} already exists; increment the Gradle version before merging`);
+            const api = required('GITHUB_API_URL');
+            const repository = required('GITHUB_REPOSITORY');
+            const token = required('GITHUB_TOKEN');
+            const headers = {Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`};
+            for (const path of [`git/ref/tags/${tag}`, `releases/tags/${tag}`]) {
+              const response = await fetch(`${api}/repos/${repository}/${path}`, {headers, signal: AbortSignal.timeout(30000)});
+              if (response.status === 404) continue;
+              if (!response.ok) throw Error(`GitHub version lookup failed (${response.status})`);
+              throw Error(`${tag} already exists; increment the Gradle version before merging`);
+            }
           })().catch((error) => {
             console.error(error.message);
             process.exitCode = 1;
