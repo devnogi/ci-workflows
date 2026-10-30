@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {spawnSync} = require('node:child_process');
+const {execFileSync, spawnSync} = require('node:child_process');
 const release = require('../scripts/release.cjs');
 
 const sha = 'a'.repeat(40);
@@ -18,7 +18,7 @@ const env = {
   COMPOSE_SERVICE: 'app', CONTAINER_NAME: 'app-prod', REMOTE_DIR: '/srv/app',
   HEALTH_URL: 'http://127.0.0.1:8080/actuator/health', HEALTH_TIMEOUT: '60', PLATFORM: 'linux/amd64',
   PROD_COMPOSE_FILE: 'docker-compose-prod.yml',
-  RELEASE_VERSION: '1.2.3', IMAGE_DIGEST: digest, DOCKERHUB_USERNAME: 'devanted',
+  RELEASE_VERSION: '1.2.3', RELEASE_COMMIT: sha, IMAGE_DIGEST: digest, DOCKERHUB_USERNAME: 'devanted',
   DOCKERHUB_REPOSITORY: 'devanted/memonogi', DOCKERHUB_PUSH_TOKEN: 'secret',
   PROD2_HOST: 'server.example', PROD2_USER: 'deployer', PROD2_SSH_PORT: '46232',
   PROD2_SSH_PRIVATE_KEY: 'private-key', PROD2_HOST_FINGERPRINT: 'SHA256:' + 'A'.repeat(43), PROD2_ENV_FILE: 'SETTING=value',
@@ -128,7 +128,7 @@ test('publication uses one Buildx push, OCI labels, metadata digest, and registr
   assert.deepEqual(calls[0], ['pull', 'devanted/memonogi:gateway-v1.2.3']);
 });
 
-test('existing immutable tag is reusable only for the same commit and version labels', async () => {
+test('existing immutable tag rejects a revision that is not an ancestor', async () => {
   const dependencies = {
     fs: {appendFileSync() {}}, spawnSync() { return {status: 0}; }, cmd() {},
     capture(_name, args) {
@@ -145,7 +145,221 @@ test('existing immutable tag is reusable only for the same commit and version la
       return {ok: true, json: async () => ({digest})};
     },
   };
-  await assert.rejects(release.publish({...env, RUNNER_TEMP: 'temp', GITHUB_OUTPUT: 'output', GITHUB_STEP_SUMMARY: 'summary'}, dependencies), /does not match/);
+  await assert.rejects(release.publish({...env, RUNNER_TEMP: 'temp', GITHUB_OUTPUT: 'output', GITHUB_STEP_SUMMARY: 'summary'}, dependencies), /not an ancestor/);
+});
+
+test('workflow-only descendants reuse the immutable artifact revision and digest', async () => {
+  const currentSha = 'c'.repeat(40);
+  const artifactSha = 'f'.repeat(40);
+  let outputs = '';
+  const gitCalls = [];
+  const commitSha = 'd'.repeat(40);
+  const parentSha = 'e'.repeat(40);
+  const dependencies = {
+    fs: {appendFileSync(_path, value) { outputs += value; }}, spawnSync() { return {status: 0}; }, cmd() {},
+    gitExecFileSync(_name, args) {
+      gitCalls.push(args);
+      if (args[0] === 'merge-base') return '';
+      if (args[0] === 'rev-list') return `${commitSha}\n`;
+      if (args[0] === 'rev-parse') return `${parentSha}\n`;
+      if (args.includes('--name-only')) return '.github/workflows/push-cd-prod.yml\0scripts/workflow-contract.test.mjs\0';
+      if (args[0] === 'show') {
+        const old = args[1].startsWith(parentSha);
+        if (args[1].endsWith('push-cd-prod.yml')) return `    uses: devnogi/ci-workflows/.github/workflows/spring-prod.yml@${(old ? 'a' : 'b').repeat(40)}\n`;
+        if (args[1].endsWith('workflow-contract.test.mjs')) return `const pin = '${(old ? 'a' : 'b').repeat(40)}';\n`;
+      }
+      throw Error('unexpected git call');
+    },
+    capture(_name, args) {
+      const format = args[3];
+      if (format.includes('revision')) return artifactSha;
+      if (format.includes('version')) return '1.2.3';
+      if (format.includes('source')) return 'https://github.com/devnogi/devnogi-gateway-server';
+      if (format.includes('RepoDigests')) return JSON.stringify([`devanted/memonogi@${digest}`]);
+      throw Error('unexpected capture');
+    },
+    fetch: async (url) => {
+      if (url.endsWith('/auth/token')) return {ok: true, json: async () => ({access_token: 'token'})};
+      if (!url.includes('/tags/')) return {ok: true, json: async () => ({is_private: true, immutable_tags_settings: {enabled: true, rules: []}})};
+      return {ok: true, json: async () => ({digest})};
+    },
+  };
+  await release.publish({...env, GITHUB_SHA: currentSha, RUNNER_TEMP: 'temp', GITHUB_OUTPUT: 'output', GITHUB_STEP_SUMMARY: 'summary'}, dependencies);
+  assert.deepEqual(gitCalls, [
+    ['merge-base', '--is-ancestor', artifactSha, currentSha],
+    ['rev-list', '--reverse', `${artifactSha}..${currentSha}`],
+    ['rev-parse', `${commitSha}^1`],
+    ['diff', '--name-only', '-z', '--no-renames', parentSha, commitSha, '--'],
+    ['show', `${parentSha}:.github/workflows/push-cd-prod.yml`],
+    ['show', `${commitSha}:.github/workflows/push-cd-prod.yml`],
+    ['show', `${parentSha}:scripts/workflow-contract.test.mjs`],
+    ['show', `${commitSha}:scripts/workflow-contract.test.mjs`],
+  ]);
+  assert.match(outputs, new RegExp(`commit=${artifactSha}`));
+  assert.match(outputs, new RegExp(`Artifact commit: ${artifactSha}`));
+  assert.match(outputs, new RegExp(`Workflow commit: ${currentSha}`));
+});
+
+test('workflow-only recovery rejects application, build, and Compose changes', () => {
+  const currentSha = 'c'.repeat(40);
+  const artifactSha = 'f'.repeat(40);
+  for (const file of ['src/main/java/App.java', 'build.gradle.kts', 'docker-compose-prod.yml']) {
+    assert.throws(() => release.verifyArtifactRevision(currentSha, artifactSha, {
+      gitExecFileSync(_name, args) {
+        if (args[0] === 'merge-base') return '';
+        if (args[0] === 'rev-list') return `${'d'.repeat(40)}\n`;
+        if (args[0] === 'rev-parse') return `${'e'.repeat(40)}\n`;
+        if (args.includes('--name-only')) return `${file}\0`;
+        return '';
+      },
+    }), /differs outside deployment workflow files/);
+  }
+});
+
+function git(directory, args, options = {}) {
+  return execFileSync('git', ['-C', directory, ...args], {encoding: 'utf8', ...options});
+}
+
+function initializeHistoryFixture() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-history-'));
+  git(directory, ['init', '-q']);
+  git(directory, ['config', 'user.name', 'CI Test']);
+  git(directory, ['config', 'user.email', 'ci@example.invalid']);
+  fs.mkdirSync(path.join(directory, 'src'), {recursive: true});
+  fs.mkdirSync(path.join(directory, '.github', 'workflows'), {recursive: true});
+  fs.mkdirSync(path.join(directory, 'scripts'), {recursive: true});
+  fs.writeFileSync(path.join(directory, 'src', 'App.java'), 'v1\n');
+  fs.writeFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), `jobs:\n  deploy:\n    uses: devnogi/ci-workflows/.github/workflows/spring-prod.yml@${'a'.repeat(40)}\n`);
+  fs.writeFileSync(path.join(directory, '.github', 'workflows', 'ci.yml'), `jobs:\n  ci:\n    uses: devnogi/ci-workflows/.github/workflows/spring-ci.yml@${'a'.repeat(40)}\n`);
+  fs.writeFileSync(path.join(directory, 'scripts', 'workflow-contract.test.mjs'), `const pin = '${'a'.repeat(40)}';\n`);
+  git(directory, ['add', '.']);
+  git(directory, ['commit', '-qm', 'artifact']);
+  return {directory, artifact: git(directory, ['rev-parse', 'HEAD']).trim()};
+}
+
+function fixtureGit(directory) {
+  return (_name, args, options) => git(directory, args, options);
+}
+
+test('real Git history accepts only workflow and contract-test changes', () => {
+  const {directory, artifact} = initializeHistoryFixture();
+  try {
+    fs.writeFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), `jobs:\n  deploy:\n    uses: devnogi/ci-workflows/.github/workflows/spring-prod.yml@${'b'.repeat(40)}\n`);
+    fs.writeFileSync(path.join(directory, 'scripts', 'workflow-contract.test.mjs'), `const pin = '${'b'.repeat(40)}';\n`);
+    git(directory, ['add', '.']);
+    git(directory, ['commit', '-qm', 'workflow fix']);
+    const current = git(directory, ['rev-parse', 'HEAD']).trim();
+    assert.equal(release.verifyArtifactRevision(current, artifact, {gitExecFileSync: fixtureGit(directory)}), artifact);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('real Git history rejects cross-boundary renames', () => {
+  const {directory, artifact} = initializeHistoryFixture();
+  try {
+    git(directory, ['mv', 'src/App.java', '.github/workflows/app.yml']);
+    git(directory, ['commit', '-qm', 'move application file']);
+    const current = git(directory, ['rev-parse', 'HEAD']).trim();
+    assert.throws(() => release.verifyArtifactRevision(current, artifact, {gitExecFileSync: fixtureGit(directory)}), /differs outside/);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('real Git history rejects an application change that was later reverted', () => {
+  const {directory, artifact} = initializeHistoryFixture();
+  try {
+    fs.writeFileSync(path.join(directory, 'src', 'App.java'), 'v2\n');
+    git(directory, ['add', 'src/App.java']);
+    git(directory, ['commit', '-qm', 'application change']);
+    fs.writeFileSync(path.join(directory, 'src', 'App.java'), 'v1\n');
+    fs.writeFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), `jobs:\n  deploy:\n    uses: devnogi/ci-workflows/.github/workflows/spring-prod.yml@${'b'.repeat(40)}\n`);
+    git(directory, ['add', '.']);
+    git(directory, ['commit', '-qm', 'revert app and fix workflow']);
+    const current = git(directory, ['rev-parse', 'HEAD']).trim();
+    assert.throws(() => release.verifyArtifactRevision(current, artifact, {gitExecFileSync: fixtureGit(directory)}), /differs outside/);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('real Git history rejects workflow input changes even when files stay allowlisted', () => {
+  const {directory, artifact} = initializeHistoryFixture();
+  try {
+    const workflow = fs.readFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), 'utf8');
+    fs.writeFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), `${workflow}    with:\n      compose-file: other-compose.yml\n`);
+    git(directory, ['add', '.github/workflows/deploy.yml']);
+    git(directory, ['commit', '-qm', 'change deployment input']);
+    const current = git(directory, ['rev-parse', 'HEAD']).trim();
+    assert.throws(() => release.verifyArtifactRevision(current, artifact, {gitExecFileSync: fixtureGit(directory)}), /only in-place shared workflow SHAs/);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('real Git history rejects changing the reusable workflow identity instead of only its SHA', () => {
+  const {directory, artifact} = initializeHistoryFixture();
+  try {
+    fs.writeFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), `jobs:\n  deploy:\n    uses: devnogi/ci-workflows/.github/workflows/node-ci.yml@${'b'.repeat(40)}\n`);
+    git(directory, ['add', '.github/workflows/deploy.yml']);
+    git(directory, ['commit', '-qm', 'change reusable workflow identity']);
+    const current = git(directory, ['rev-parse', 'HEAD']).trim();
+    assert.throws(() => release.verifyArtifactRevision(current, artifact, {gitExecFileSync: fixtureGit(directory)}), /only in-place shared workflow SHAs/);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('real Git history rejects adding a reusable workflow call without a matching removal', () => {
+  const {directory, artifact} = initializeHistoryFixture();
+  try {
+    const workflow = fs.readFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), 'utf8');
+    fs.writeFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), `${workflow}    uses: devnogi/ci-workflows/.github/workflows/spring-prod.yml@${'b'.repeat(40)}\n`);
+    git(directory, ['add', '.github/workflows/deploy.yml']);
+    git(directory, ['commit', '-qm', 'add reusable workflow call']);
+    const current = git(directory, ['rev-parse', 'HEAD']).trim();
+    assert.throws(() => release.verifyArtifactRevision(current, artifact, {gitExecFileSync: fixtureGit(directory)}), /only in-place shared workflow SHAs/);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('real Git history rejects swapping reusable workflow identities between caller files', () => {
+  const {directory, artifact} = initializeHistoryFixture();
+  try {
+    fs.writeFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), `jobs:\n  deploy:\n    uses: devnogi/ci-workflows/.github/workflows/spring-ci.yml@${'b'.repeat(40)}\n`);
+    fs.writeFileSync(path.join(directory, '.github', 'workflows', 'ci.yml'), `jobs:\n  ci:\n    uses: devnogi/ci-workflows/.github/workflows/spring-prod.yml@${'b'.repeat(40)}\n`);
+    git(directory, ['add', '.github/workflows']);
+    git(directory, ['commit', '-qm', 'swap reusable workflow identities']);
+    const current = git(directory, ['rev-parse', 'HEAD']).trim();
+    assert.throws(() => release.verifyArtifactRevision(current, artifact, {gitExecFileSync: fixtureGit(directory)}), /only in-place shared workflow SHAs/);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('real Git history rejects application changes introduced by a merge result', () => {
+  const {directory, artifact} = initializeHistoryFixture();
+  try {
+    const mainBranch = git(directory, ['branch', '--show-current']).trim();
+    git(directory, ['switch', '-qc', 'application-feature']);
+    fs.writeFileSync(path.join(directory, 'src', 'App.java'), 'merged application change\n');
+    git(directory, ['add', 'src/App.java']);
+    git(directory, ['commit', '-qm', 'application feature']);
+    git(directory, ['switch', '-q', mainBranch]);
+    fs.writeFileSync(path.join(directory, 'scripts', 'workflow-contract.test.mjs'), `const pin = '${'b'.repeat(40)}';\n`);
+    git(directory, ['add', 'scripts/workflow-contract.test.mjs']);
+    git(directory, ['commit', '-qm', 'provider pin']);
+    git(directory, ['merge', '--no-ff', '-qm', 'merge application feature', 'application-feature']);
+    const current = git(directory, ['rev-parse', 'HEAD']).trim();
+    assert.throws(() => release.verifyArtifactRevision(current, artifact, {gitExecFileSync: fixtureGit(directory)}), /differs outside/);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('real Git history rejects workflow input changes introduced by a merge result', () => {
+  const {directory, artifact} = initializeHistoryFixture();
+  try {
+    const mainBranch = git(directory, ['branch', '--show-current']).trim();
+    git(directory, ['switch', '-qc', 'workflow-feature']);
+    const workflow = fs.readFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), 'utf8');
+    fs.writeFileSync(path.join(directory, '.github', 'workflows', 'deploy.yml'), `${workflow}    with:\n      compose-file: other-compose.yml\n`);
+    git(directory, ['add', '.github/workflows/deploy.yml']);
+    git(directory, ['commit', '-qm', 'workflow input feature']);
+    git(directory, ['switch', '-q', mainBranch]);
+    fs.writeFileSync(path.join(directory, 'scripts', 'workflow-contract.test.mjs'), `const pin = '${'b'.repeat(40)}';\n`);
+    git(directory, ['add', 'scripts/workflow-contract.test.mjs']);
+    git(directory, ['commit', '-qm', 'provider pin']);
+    git(directory, ['merge', '--no-ff', '-qm', 'merge workflow feature', 'workflow-feature']);
+    const current = git(directory, ['rev-parse', 'HEAD']).trim();
+    assert.throws(() => release.verifyArtifactRevision(current, artifact, {gitExecFileSync: fixtureGit(directory)}), /only in-place shared workflow SHAs/);
+  } finally { fs.rmSync(directory, {recursive: true, force: true}); }
 });
 
 test('existing immutable tag is not reusable when its OCI source is another repository', async () => {
@@ -200,7 +414,7 @@ test('GitHub Release is created after deployment metadata and exact retries do n
       posts += 1;
       const payload = JSON.parse(options.body);
       assert.equal(payload.tag_name, tag);
-      assert.equal(payload.target_commitish, sha);
+      assert.equal(payload.target_commitish, 'main');
       assert.equal(payload.body, body);
       created = true;
       return response(201, existing);
@@ -214,6 +428,31 @@ test('GitHub Release is created after deployment metadata and exact retries do n
   assert.match(summary, /releases\/tag\/gateway-v1\.2\.3/);
 });
 
+test('recovery release targets current main and records artifact and workflow commits', async () => {
+  const artifactSha = 'f'.repeat(40);
+  const recoveryEnv = {...env, RELEASE_COMMIT: artifactSha, GITHUB_STEP_SUMMARY: 'summary'};
+  const tag = 'gateway-v1.2.3';
+  const body = release.releaseBody(recoveryEnv);
+  let created = false;
+  const existing = {tag_name: tag, name: tag, body, draft: false, prerelease: false, html_url: 'release'};
+  await release.githubRelease(recoveryEnv, {
+    fs: {appendFileSync() {}},
+    fetch: async (url, options = {}) => {
+      if (url.endsWith(`/releases/tags/${tag}`)) return created ? response(200, existing) : response(404, {});
+      if (url.endsWith(`/git/ref/tags/${tag}`)) return created ? response(200, {object: {type: 'commit', sha}}) : response(404, {});
+      if (url.endsWith('/releases') && options.method === 'POST') {
+        const payload = JSON.parse(options.body);
+        assert.equal(payload.target_commitish, 'main');
+        assert.match(payload.body, new RegExp(`/commit/${artifactSha}`));
+        assert.match(payload.body, new RegExp(`/commit/${sha}`));
+        created = true;
+        return response(201, existing);
+      }
+      throw Error(`unexpected request ${url}`);
+    },
+  });
+});
+
 test('GitHub Release refuses tag, commit, digest, and metadata mismatches without mutation', async () => {
   const tag = 'gateway-v1.2.3';
   const exact = {tag_name: tag, name: tag, body: release.releaseBody(env), draft: false, prerelease: false, html_url: 'release'};
@@ -223,14 +462,44 @@ test('GitHub Release refuses tag, commit, digest, and metadata mismatches withou
     fetch: async (url, options = {}) => {
       if (url.endsWith(`/releases/tags/${tag}`)) return response(200, existing);
       if (url.endsWith(`/git/ref/tags/${tag}`)) return response(200, {object: {type: 'commit', sha: commit}});
+      if (url.endsWith(`/compare/${sha}...${commit}`)) return response(200, {status: 'diverged', merge_base_commit: {sha: 'e'.repeat(40)}});
       if (options.method === 'POST') posts += 1;
       throw Error(`unexpected request ${url}`);
     },
   });
-  await assert.rejects(run(exact, 'f'.repeat(40)), /different commit/);
+  await assert.rejects(run(exact, 'f'.repeat(40)), /not the deployment commit/);
   await assert.rejects(run({...exact, body: exact.body.replace(digest, `sha256:${'c'.repeat(64)}`)}), /does not match/);
   await assert.rejects(run({...exact, draft: true}), /does not match/);
   assert.equal(posts, 0);
+});
+
+test('GitHub Release accepts a tag on a descendant when main advances during deployment', async () => {
+  const tag = 'gateway-v1.2.3';
+  const descendant = 'd'.repeat(40);
+  const existing = {tag_name: tag, name: tag, body: release.releaseBody(env), draft: false, prerelease: false, html_url: 'release'};
+  let compared = false;
+  await release.githubRelease({...env, GITHUB_STEP_SUMMARY: 'summary'}, {
+    fs: {appendFileSync() {}},
+    fetch: async (url) => {
+      if (url.endsWith(`/releases/tags/${tag}`)) return response(200, existing);
+      if (url.endsWith(`/git/ref/tags/${tag}`)) return response(200, {object: {type: 'commit', sha: descendant}});
+      if (url.endsWith(`/compare/${sha}...${descendant}`)) {
+        compared = true;
+        return response(200, {status: 'ahead', merge_base_commit: {sha}});
+      }
+      throw Error(`unexpected request ${url}`);
+    },
+  });
+  assert.equal(compared, true);
+});
+
+test('GitHub Release requires the published artifact commit output', async () => {
+  let requested = false;
+  await assert.rejects(release.githubRelease({...env, RELEASE_COMMIT: '', GITHUB_STEP_SUMMARY: 'summary'}, {
+    fs: {appendFileSync() {}},
+    fetch: async () => { requested = true; throw Error('must not be called'); },
+  }), /Missing RELEASE_COMMIT/);
+  assert.equal(requested, false);
 });
 
 test('invalid deployment secrets stop publication before registry access', async () => {

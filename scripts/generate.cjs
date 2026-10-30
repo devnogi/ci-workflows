@@ -29,7 +29,7 @@ const nodeRun = (mode) => `node - ${mode} <<'RELEASE_SCRIPT'\n${release}\nRELEAS
 const fixedProfile = (kind) => kind === 'node' ? '          SERVICE_PROFILE: react\n' : '';
 
 const deployJob = (integrated) => `  deploy:
-${integrated ? '    needs: publish\n' : ''}    runs-on: ubuntu-latest
+${integrated ? "    needs: publish\n    if: ${{ !cancelled() && needs.publish.result == 'success' }}\n" : ''}    runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
     concurrency:
@@ -56,7 +56,7 @@ ${indent(local, 10)}
 
 const releaseJob = (inputs, kind) => `  release:
     needs: [publish, deploy]
-    if: \${{ needs.publish.result == 'success' && needs.deploy.result == 'success' }}
+    if: \${{ !cancelled() && needs.publish.result == 'success' && needs.deploy.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -66,6 +66,7 @@ const releaseJob = (inputs, kind) => `  release:
         env:
 ${inputEnvironment(inputs)}
 ${fixedProfile(kind)}          RELEASE_VERSION: \${{ needs.publish.outputs.version }}
+          RELEASE_COMMIT: \${{ needs.publish.outputs.commit }}
           IMAGE_DIGEST: \${{ needs.publish.outputs.digest }}
           DOCKERHUB_REPOSITORY: \${{ vars.DOCKERHUB_REPOSITORY }}
           GITHUB_TOKEN: \${{ github.token }}
@@ -90,6 +91,8 @@ ${secretDefinitions(workflowCallSecrets)}
         value: \${{ jobs.publish.outputs.digest }}
       tag:
         value: \${{ jobs.publish.outputs.tag }}
+      commit:
+        value: \${{ jobs.publish.outputs.commit }}
 permissions:
   contents: read
 jobs:
@@ -122,8 +125,11 @@ ${ciJobs}
       version: \${{ steps.publish.outputs.version }}
       digest: \${{ steps.publish.outputs.digest }}
       tag: \${{ steps.publish.outputs.tag }}
+      commit: \${{ steps.publish.outputs.commit }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
       - name: Publish immutable image
         id: publish
         env:

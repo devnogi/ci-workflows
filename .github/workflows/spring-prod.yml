@@ -43,6 +43,8 @@ on:
         value: ${{ jobs.publish.outputs.digest }}
       tag:
         value: ${{ jobs.publish.outputs.tag }}
+      commit:
+        value: ${{ jobs.publish.outputs.commit }}
 permissions:
   contents: read
 jobs:
@@ -140,6 +142,65 @@ jobs:
             if (versionDigest === null) return 'build';
             if (/^sha256:[a-f0-9]{64}$/.test(versionDigest)) return 'verify-reuse';
             throw Error('Invalid existing tag digest');
+          }
+
+          function verifyArtifactRevision(currentSha, artifactRevision, deps = {}) {
+            if (!/^[a-f0-9]{40}$/.test(artifactRevision)) throw Error('Invalid existing image revision');
+            if (artifactRevision === currentSha) return artifactRevision;
+            const git = deps.gitExecFileSync || execFileSync;
+            try {
+              git('git', ['merge-base', '--is-ancestor', artifactRevision, currentSha], {stdio: 'ignore'});
+            } catch {
+              throw Error('Existing image revision is not an ancestor of this commit');
+            }
+            let commits;
+            try {
+              commits = git('git', ['rev-list', '--reverse', `${artifactRevision}..${currentSha}`], {encoding: 'utf8'}).trim().split(/\r?\n/).filter(Boolean);
+            } catch {
+              throw Error('Cannot enumerate existing image recovery commits');
+            }
+            const allowed = (file) => file.startsWith('.github/workflows/') || file === 'scripts/workflow-contract.test.mjs';
+            const normalizePins = (file, contents) => {
+              if (file === 'scripts/workflow-contract.test.mjs') {
+                return contents.replace(/(const pin = ')[a-f0-9]{40}(';)/g, '$1<sha>$2');
+              }
+              return contents.replace(/(devnogi\/ci-workflows\/\.github\/workflows\/(?:spring|node)-(?:ci|prod)\.yml@)[a-f0-9]{40}/g, '$1<sha>');
+            };
+            let changed = false;
+            for (const commit of commits) {
+              let parent;
+              let paths;
+              try {
+                parent = git('git', ['rev-parse', `${commit}^1`], {encoding: 'utf8'}).trim();
+                paths = git('git', ['diff', '--name-only', '-z', '--no-renames', parent, commit, '--'], {encoding: 'utf8'}).split(String.fromCharCode(0)).filter(Boolean);
+              } catch {
+                throw Error('Cannot verify deployment workflow pin changes');
+              }
+              if (paths.length === 0) continue;
+              changed = true;
+              if (paths.some((file) => !allowed(file))) throw Error('Existing image revision differs outside deployment workflow files');
+              for (const file of paths) {
+                let before;
+                let after;
+                try {
+                  before = git('git', ['show', `${parent}:${file}`], {encoding: 'utf8'});
+                  after = git('git', ['show', `${commit}:${file}`], {encoding: 'utf8'});
+                } catch {
+                  throw Error('Existing image recovery cannot add, delete, or rename caller files');
+                }
+                if (before === after || normalizePins(file, before) !== normalizePins(file, after)) {
+                  throw Error('Existing image recovery may change only in-place shared workflow SHAs');
+                }
+              }
+            }
+            if (!changed) throw Error('Existing image recovery contains no workflow pin change');
+            return artifactRevision;
+          }
+
+          function releaseCommit(env) {
+            const commit = required(env, 'RELEASE_COMMIT').trim();
+            if (!/^[a-f0-9]{40}$/.test(commit)) throw Error('Invalid release commit');
+            return commit;
           }
 
           function immutableTagsRequired(info, tags) {
@@ -250,6 +311,7 @@ jobs:
             let versionDigest = await readDigest(versionTag);
             const state = collision(versionDigest);
             let digest;
+            let artifactRevision = sha;
             const loginResult = login('docker', ['login', '--username', username, '--password-stdin'], {
               input: env.DOCKERHUB_PUSH_TOKEN,
               stdio: ['pipe', 'ignore', 'pipe'],
@@ -262,9 +324,10 @@ jobs:
               const imageVersion = inspect('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.opencontainers.image.version" }}', `${image}:${versionTag}`]);
               const source = inspect('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.opencontainers.image.source" }}', `${image}:${versionTag}`]);
               const repoDigests = JSON.parse(inspect('docker', ['image', 'inspect', '--format', '{{json .RepoDigests}}', `${image}:${versionTag}`]));
-              if (revision !== sha || imageVersion !== release || source !== `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}` || !repoDigests.includes(`${image}@${versionDigest}`)) {
+              if (imageVersion !== release || source !== `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}` || !repoDigests.includes(`${image}@${versionDigest}`)) {
                 throw Error('Existing tag does not match this commit and version');
               }
+              artifactRevision = verifyArtifactRevision(sha, revision, deps);
               digest = versionDigest;
             } else {
               if (await readDigest(versionTag) !== null) throw Error('Tag appeared before publication');
@@ -293,22 +356,24 @@ jobs:
               if (versionDigest !== digest) throw Error('Registry digest does not match Buildx output');
             }
 
-            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\ntag=${versionTag}\n`);
-            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${service}\n\nVersion: ${release}\n\nTag: ${versionTag}\n\nCommit: ${sha}\n\nDigest: ${digest}\n`);
+            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\ntag=${versionTag}\ncommit=${artifactRevision}\n`);
+            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${service}\n\nVersion: ${release}\n\nTag: ${versionTag}\n\nArtifact commit: ${artifactRevision}\n\nWorkflow commit: ${sha}\n\nDigest: ${digest}\n`);
           }
 
           function releaseBody(env) {
             const service = required(env, 'SERVICE_NAME');
             const release = version(required(env, 'RELEASE_VERSION'), false);
-            const sha = required(env, 'GITHUB_SHA');
+            const sha = releaseCommit(env);
             const digest = required(env, 'IMAGE_DIGEST');
             const image = required(env, 'DOCKERHUB_REPOSITORY');
             const tag = `${service}-v${release}`;
+            const workflowSha = required(env, 'GITHUB_SHA');
             if (!/^sha256:[a-f0-9]{64}$/.test(digest)) throw Error('Invalid image digest');
             return [
               `Service: ${service}`,
               `Version: ${release}`,
-              `Commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${sha}`,
+              `Artifact commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${sha}`,
+              `Deployment workflow commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${workflowSha}`,
               `Image: ${image}@${digest}`,
               `Docker tag: ${image}:${tag}`,
             ].join('\n\n');
@@ -322,6 +387,7 @@ jobs:
             const service = env.SERVICE_NAME;
             const release = version(required(env, 'RELEASE_VERSION'), false);
             const tag = `${service}-v${release}`;
+            const tagCommit = required(env, 'GITHUB_SHA');
             const body = releaseBody(env);
             const api = required(env, 'GITHUB_API_URL');
             if (api !== 'https://api.github.com') throw Error('Invalid GitHub API URL');
@@ -353,9 +419,16 @@ jobs:
               if (object.type !== 'commit' || !/^[a-f0-9]{40}$/.test(object.sha)) throw Error('Release tag does not resolve to a commit');
               return object.sha;
             };
+            const verifyTagCommit = async (commit) => {
+              if (commit === tagCommit) return;
+              const comparison = await call(`/compare/${tagCommit}...${commit}`);
+              if (!comparison || comparison.status !== 'ahead' || comparison.merge_base_commit?.sha !== tagCommit) {
+                throw Error('Release tag is not the deployment commit or its descendant');
+              }
+            };
             const verify = async (existing) => {
               const commit = await resolveTag();
-              if (commit !== env.GITHUB_SHA) throw Error('Release tag points to a different commit');
+              await verifyTagCommit(commit);
               if (!existing || existing.tag_name !== tag || existing.name !== tag || existing.body !== body || existing.draft || existing.prerelease) {
                 throw Error('Existing GitHub Release does not match deployed metadata');
               }
@@ -367,13 +440,13 @@ jobs:
               existing = await verify(existing);
             } else {
               const commit = await resolveTag();
-              if (commit && commit !== env.GITHUB_SHA) throw Error('Release tag points to a different commit');
+              if (commit) await verifyTagCommit(commit);
               existing = await call('/releases', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                   tag_name: tag,
-                  target_commitish: env.GITHUB_SHA,
+                  target_commitish: 'main',
                   name: tag,
                   body,
                   draft: false,
@@ -389,7 +462,7 @@ jobs:
             return existing;
           }
 
-          module.exports = {collision, githubRelease, immutableTagsRequired, publish, releaseBody, resolveGradleVersion, resolveNpmVersion, validateDeploymentSecrets, validateDeploymentSettings, validateInputs, validatePublishSecrets, version};
+          module.exports = {collision, githubRelease, immutableTagsRequired, publish, releaseBody, releaseCommit, resolveGradleVersion, resolveNpmVersion, validateDeploymentSecrets, validateDeploymentSettings, validateInputs, validatePublishSecrets, verifyArtifactRevision, version};
 
           if (require.main === module || process.argv[1] === '-') {
             const mode = process.argv[2];
@@ -507,6 +580,65 @@ jobs:
             throw Error('Invalid existing tag digest');
           }
 
+          function verifyArtifactRevision(currentSha, artifactRevision, deps = {}) {
+            if (!/^[a-f0-9]{40}$/.test(artifactRevision)) throw Error('Invalid existing image revision');
+            if (artifactRevision === currentSha) return artifactRevision;
+            const git = deps.gitExecFileSync || execFileSync;
+            try {
+              git('git', ['merge-base', '--is-ancestor', artifactRevision, currentSha], {stdio: 'ignore'});
+            } catch {
+              throw Error('Existing image revision is not an ancestor of this commit');
+            }
+            let commits;
+            try {
+              commits = git('git', ['rev-list', '--reverse', `${artifactRevision}..${currentSha}`], {encoding: 'utf8'}).trim().split(/\r?\n/).filter(Boolean);
+            } catch {
+              throw Error('Cannot enumerate existing image recovery commits');
+            }
+            const allowed = (file) => file.startsWith('.github/workflows/') || file === 'scripts/workflow-contract.test.mjs';
+            const normalizePins = (file, contents) => {
+              if (file === 'scripts/workflow-contract.test.mjs') {
+                return contents.replace(/(const pin = ')[a-f0-9]{40}(';)/g, '$1<sha>$2');
+              }
+              return contents.replace(/(devnogi\/ci-workflows\/\.github\/workflows\/(?:spring|node)-(?:ci|prod)\.yml@)[a-f0-9]{40}/g, '$1<sha>');
+            };
+            let changed = false;
+            for (const commit of commits) {
+              let parent;
+              let paths;
+              try {
+                parent = git('git', ['rev-parse', `${commit}^1`], {encoding: 'utf8'}).trim();
+                paths = git('git', ['diff', '--name-only', '-z', '--no-renames', parent, commit, '--'], {encoding: 'utf8'}).split(String.fromCharCode(0)).filter(Boolean);
+              } catch {
+                throw Error('Cannot verify deployment workflow pin changes');
+              }
+              if (paths.length === 0) continue;
+              changed = true;
+              if (paths.some((file) => !allowed(file))) throw Error('Existing image revision differs outside deployment workflow files');
+              for (const file of paths) {
+                let before;
+                let after;
+                try {
+                  before = git('git', ['show', `${parent}:${file}`], {encoding: 'utf8'});
+                  after = git('git', ['show', `${commit}:${file}`], {encoding: 'utf8'});
+                } catch {
+                  throw Error('Existing image recovery cannot add, delete, or rename caller files');
+                }
+                if (before === after || normalizePins(file, before) !== normalizePins(file, after)) {
+                  throw Error('Existing image recovery may change only in-place shared workflow SHAs');
+                }
+              }
+            }
+            if (!changed) throw Error('Existing image recovery contains no workflow pin change');
+            return artifactRevision;
+          }
+
+          function releaseCommit(env) {
+            const commit = required(env, 'RELEASE_COMMIT').trim();
+            if (!/^[a-f0-9]{40}$/.test(commit)) throw Error('Invalid release commit');
+            return commit;
+          }
+
           function immutableTagsRequired(info, tags) {
             if (!info || info.is_private !== true) throw Error('Private Docker Hub repository required');
             const settings = info.immutable_tags_settings;
@@ -615,6 +747,7 @@ jobs:
             let versionDigest = await readDigest(versionTag);
             const state = collision(versionDigest);
             let digest;
+            let artifactRevision = sha;
             const loginResult = login('docker', ['login', '--username', username, '--password-stdin'], {
               input: env.DOCKERHUB_PUSH_TOKEN,
               stdio: ['pipe', 'ignore', 'pipe'],
@@ -627,9 +760,10 @@ jobs:
               const imageVersion = inspect('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.opencontainers.image.version" }}', `${image}:${versionTag}`]);
               const source = inspect('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.opencontainers.image.source" }}', `${image}:${versionTag}`]);
               const repoDigests = JSON.parse(inspect('docker', ['image', 'inspect', '--format', '{{json .RepoDigests}}', `${image}:${versionTag}`]));
-              if (revision !== sha || imageVersion !== release || source !== `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}` || !repoDigests.includes(`${image}@${versionDigest}`)) {
+              if (imageVersion !== release || source !== `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}` || !repoDigests.includes(`${image}@${versionDigest}`)) {
                 throw Error('Existing tag does not match this commit and version');
               }
+              artifactRevision = verifyArtifactRevision(sha, revision, deps);
               digest = versionDigest;
             } else {
               if (await readDigest(versionTag) !== null) throw Error('Tag appeared before publication');
@@ -658,22 +792,24 @@ jobs:
               if (versionDigest !== digest) throw Error('Registry digest does not match Buildx output');
             }
 
-            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\ntag=${versionTag}\n`);
-            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${service}\n\nVersion: ${release}\n\nTag: ${versionTag}\n\nCommit: ${sha}\n\nDigest: ${digest}\n`);
+            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\ntag=${versionTag}\ncommit=${artifactRevision}\n`);
+            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${service}\n\nVersion: ${release}\n\nTag: ${versionTag}\n\nArtifact commit: ${artifactRevision}\n\nWorkflow commit: ${sha}\n\nDigest: ${digest}\n`);
           }
 
           function releaseBody(env) {
             const service = required(env, 'SERVICE_NAME');
             const release = version(required(env, 'RELEASE_VERSION'), false);
-            const sha = required(env, 'GITHUB_SHA');
+            const sha = releaseCommit(env);
             const digest = required(env, 'IMAGE_DIGEST');
             const image = required(env, 'DOCKERHUB_REPOSITORY');
             const tag = `${service}-v${release}`;
+            const workflowSha = required(env, 'GITHUB_SHA');
             if (!/^sha256:[a-f0-9]{64}$/.test(digest)) throw Error('Invalid image digest');
             return [
               `Service: ${service}`,
               `Version: ${release}`,
-              `Commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${sha}`,
+              `Artifact commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${sha}`,
+              `Deployment workflow commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${workflowSha}`,
               `Image: ${image}@${digest}`,
               `Docker tag: ${image}:${tag}`,
             ].join('\n\n');
@@ -687,6 +823,7 @@ jobs:
             const service = env.SERVICE_NAME;
             const release = version(required(env, 'RELEASE_VERSION'), false);
             const tag = `${service}-v${release}`;
+            const tagCommit = required(env, 'GITHUB_SHA');
             const body = releaseBody(env);
             const api = required(env, 'GITHUB_API_URL');
             if (api !== 'https://api.github.com') throw Error('Invalid GitHub API URL');
@@ -718,9 +855,16 @@ jobs:
               if (object.type !== 'commit' || !/^[a-f0-9]{40}$/.test(object.sha)) throw Error('Release tag does not resolve to a commit');
               return object.sha;
             };
+            const verifyTagCommit = async (commit) => {
+              if (commit === tagCommit) return;
+              const comparison = await call(`/compare/${tagCommit}...${commit}`);
+              if (!comparison || comparison.status !== 'ahead' || comparison.merge_base_commit?.sha !== tagCommit) {
+                throw Error('Release tag is not the deployment commit or its descendant');
+              }
+            };
             const verify = async (existing) => {
               const commit = await resolveTag();
-              if (commit !== env.GITHUB_SHA) throw Error('Release tag points to a different commit');
+              await verifyTagCommit(commit);
               if (!existing || existing.tag_name !== tag || existing.name !== tag || existing.body !== body || existing.draft || existing.prerelease) {
                 throw Error('Existing GitHub Release does not match deployed metadata');
               }
@@ -732,13 +876,13 @@ jobs:
               existing = await verify(existing);
             } else {
               const commit = await resolveTag();
-              if (commit && commit !== env.GITHUB_SHA) throw Error('Release tag points to a different commit');
+              if (commit) await verifyTagCommit(commit);
               existing = await call('/releases', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                   tag_name: tag,
-                  target_commitish: env.GITHUB_SHA,
+                  target_commitish: 'main',
                   name: tag,
                   body,
                   draft: false,
@@ -754,7 +898,7 @@ jobs:
             return existing;
           }
 
-          module.exports = {collision, githubRelease, immutableTagsRequired, publish, releaseBody, resolveGradleVersion, resolveNpmVersion, validateDeploymentSecrets, validateDeploymentSettings, validateInputs, validatePublishSecrets, version};
+          module.exports = {collision, githubRelease, immutableTagsRequired, publish, releaseBody, releaseCommit, resolveGradleVersion, resolveNpmVersion, validateDeploymentSecrets, validateDeploymentSettings, validateInputs, validatePublishSecrets, verifyArtifactRevision, version};
 
           if (require.main === module || process.argv[1] === '-') {
             const mode = process.argv[2];
@@ -1057,8 +1201,11 @@ jobs:
       version: ${{ steps.publish.outputs.version }}
       digest: ${{ steps.publish.outputs.digest }}
       tag: ${{ steps.publish.outputs.tag }}
+      commit: ${{ steps.publish.outputs.commit }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
       - name: Publish immutable image
         id: publish
         env:
@@ -1166,6 +1313,65 @@ jobs:
             if (versionDigest === null) return 'build';
             if (/^sha256:[a-f0-9]{64}$/.test(versionDigest)) return 'verify-reuse';
             throw Error('Invalid existing tag digest');
+          }
+
+          function verifyArtifactRevision(currentSha, artifactRevision, deps = {}) {
+            if (!/^[a-f0-9]{40}$/.test(artifactRevision)) throw Error('Invalid existing image revision');
+            if (artifactRevision === currentSha) return artifactRevision;
+            const git = deps.gitExecFileSync || execFileSync;
+            try {
+              git('git', ['merge-base', '--is-ancestor', artifactRevision, currentSha], {stdio: 'ignore'});
+            } catch {
+              throw Error('Existing image revision is not an ancestor of this commit');
+            }
+            let commits;
+            try {
+              commits = git('git', ['rev-list', '--reverse', `${artifactRevision}..${currentSha}`], {encoding: 'utf8'}).trim().split(/\r?\n/).filter(Boolean);
+            } catch {
+              throw Error('Cannot enumerate existing image recovery commits');
+            }
+            const allowed = (file) => file.startsWith('.github/workflows/') || file === 'scripts/workflow-contract.test.mjs';
+            const normalizePins = (file, contents) => {
+              if (file === 'scripts/workflow-contract.test.mjs') {
+                return contents.replace(/(const pin = ')[a-f0-9]{40}(';)/g, '$1<sha>$2');
+              }
+              return contents.replace(/(devnogi\/ci-workflows\/\.github\/workflows\/(?:spring|node)-(?:ci|prod)\.yml@)[a-f0-9]{40}/g, '$1<sha>');
+            };
+            let changed = false;
+            for (const commit of commits) {
+              let parent;
+              let paths;
+              try {
+                parent = git('git', ['rev-parse', `${commit}^1`], {encoding: 'utf8'}).trim();
+                paths = git('git', ['diff', '--name-only', '-z', '--no-renames', parent, commit, '--'], {encoding: 'utf8'}).split(String.fromCharCode(0)).filter(Boolean);
+              } catch {
+                throw Error('Cannot verify deployment workflow pin changes');
+              }
+              if (paths.length === 0) continue;
+              changed = true;
+              if (paths.some((file) => !allowed(file))) throw Error('Existing image revision differs outside deployment workflow files');
+              for (const file of paths) {
+                let before;
+                let after;
+                try {
+                  before = git('git', ['show', `${parent}:${file}`], {encoding: 'utf8'});
+                  after = git('git', ['show', `${commit}:${file}`], {encoding: 'utf8'});
+                } catch {
+                  throw Error('Existing image recovery cannot add, delete, or rename caller files');
+                }
+                if (before === after || normalizePins(file, before) !== normalizePins(file, after)) {
+                  throw Error('Existing image recovery may change only in-place shared workflow SHAs');
+                }
+              }
+            }
+            if (!changed) throw Error('Existing image recovery contains no workflow pin change');
+            return artifactRevision;
+          }
+
+          function releaseCommit(env) {
+            const commit = required(env, 'RELEASE_COMMIT').trim();
+            if (!/^[a-f0-9]{40}$/.test(commit)) throw Error('Invalid release commit');
+            return commit;
           }
 
           function immutableTagsRequired(info, tags) {
@@ -1276,6 +1482,7 @@ jobs:
             let versionDigest = await readDigest(versionTag);
             const state = collision(versionDigest);
             let digest;
+            let artifactRevision = sha;
             const loginResult = login('docker', ['login', '--username', username, '--password-stdin'], {
               input: env.DOCKERHUB_PUSH_TOKEN,
               stdio: ['pipe', 'ignore', 'pipe'],
@@ -1288,9 +1495,10 @@ jobs:
               const imageVersion = inspect('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.opencontainers.image.version" }}', `${image}:${versionTag}`]);
               const source = inspect('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.opencontainers.image.source" }}', `${image}:${versionTag}`]);
               const repoDigests = JSON.parse(inspect('docker', ['image', 'inspect', '--format', '{{json .RepoDigests}}', `${image}:${versionTag}`]));
-              if (revision !== sha || imageVersion !== release || source !== `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}` || !repoDigests.includes(`${image}@${versionDigest}`)) {
+              if (imageVersion !== release || source !== `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}` || !repoDigests.includes(`${image}@${versionDigest}`)) {
                 throw Error('Existing tag does not match this commit and version');
               }
+              artifactRevision = verifyArtifactRevision(sha, revision, deps);
               digest = versionDigest;
             } else {
               if (await readDigest(versionTag) !== null) throw Error('Tag appeared before publication');
@@ -1319,22 +1527,24 @@ jobs:
               if (versionDigest !== digest) throw Error('Registry digest does not match Buildx output');
             }
 
-            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\ntag=${versionTag}\n`);
-            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${service}\n\nVersion: ${release}\n\nTag: ${versionTag}\n\nCommit: ${sha}\n\nDigest: ${digest}\n`);
+            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\ntag=${versionTag}\ncommit=${artifactRevision}\n`);
+            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${service}\n\nVersion: ${release}\n\nTag: ${versionTag}\n\nArtifact commit: ${artifactRevision}\n\nWorkflow commit: ${sha}\n\nDigest: ${digest}\n`);
           }
 
           function releaseBody(env) {
             const service = required(env, 'SERVICE_NAME');
             const release = version(required(env, 'RELEASE_VERSION'), false);
-            const sha = required(env, 'GITHUB_SHA');
+            const sha = releaseCommit(env);
             const digest = required(env, 'IMAGE_DIGEST');
             const image = required(env, 'DOCKERHUB_REPOSITORY');
             const tag = `${service}-v${release}`;
+            const workflowSha = required(env, 'GITHUB_SHA');
             if (!/^sha256:[a-f0-9]{64}$/.test(digest)) throw Error('Invalid image digest');
             return [
               `Service: ${service}`,
               `Version: ${release}`,
-              `Commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${sha}`,
+              `Artifact commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${sha}`,
+              `Deployment workflow commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${workflowSha}`,
               `Image: ${image}@${digest}`,
               `Docker tag: ${image}:${tag}`,
             ].join('\n\n');
@@ -1348,6 +1558,7 @@ jobs:
             const service = env.SERVICE_NAME;
             const release = version(required(env, 'RELEASE_VERSION'), false);
             const tag = `${service}-v${release}`;
+            const tagCommit = required(env, 'GITHUB_SHA');
             const body = releaseBody(env);
             const api = required(env, 'GITHUB_API_URL');
             if (api !== 'https://api.github.com') throw Error('Invalid GitHub API URL');
@@ -1379,9 +1590,16 @@ jobs:
               if (object.type !== 'commit' || !/^[a-f0-9]{40}$/.test(object.sha)) throw Error('Release tag does not resolve to a commit');
               return object.sha;
             };
+            const verifyTagCommit = async (commit) => {
+              if (commit === tagCommit) return;
+              const comparison = await call(`/compare/${tagCommit}...${commit}`);
+              if (!comparison || comparison.status !== 'ahead' || comparison.merge_base_commit?.sha !== tagCommit) {
+                throw Error('Release tag is not the deployment commit or its descendant');
+              }
+            };
             const verify = async (existing) => {
               const commit = await resolveTag();
-              if (commit !== env.GITHUB_SHA) throw Error('Release tag points to a different commit');
+              await verifyTagCommit(commit);
               if (!existing || existing.tag_name !== tag || existing.name !== tag || existing.body !== body || existing.draft || existing.prerelease) {
                 throw Error('Existing GitHub Release does not match deployed metadata');
               }
@@ -1393,13 +1611,13 @@ jobs:
               existing = await verify(existing);
             } else {
               const commit = await resolveTag();
-              if (commit && commit !== env.GITHUB_SHA) throw Error('Release tag points to a different commit');
+              if (commit) await verifyTagCommit(commit);
               existing = await call('/releases', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                   tag_name: tag,
-                  target_commitish: env.GITHUB_SHA,
+                  target_commitish: 'main',
                   name: tag,
                   body,
                   draft: false,
@@ -1415,7 +1633,7 @@ jobs:
             return existing;
           }
 
-          module.exports = {collision, githubRelease, immutableTagsRequired, publish, releaseBody, resolveGradleVersion, resolveNpmVersion, validateDeploymentSecrets, validateDeploymentSettings, validateInputs, validatePublishSecrets, version};
+          module.exports = {collision, githubRelease, immutableTagsRequired, publish, releaseBody, releaseCommit, resolveGradleVersion, resolveNpmVersion, validateDeploymentSecrets, validateDeploymentSettings, validateInputs, validatePublishSecrets, verifyArtifactRevision, version};
 
           if (require.main === module || process.argv[1] === '-') {
             const mode = process.argv[2];
@@ -1436,6 +1654,7 @@ jobs:
           RELEASE_SCRIPT
   deploy:
     needs: publish
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
@@ -1650,7 +1869,7 @@ jobs:
           DEPLOY_SCRIPT_EOF
   release:
     needs: [publish, deploy]
-    if: ${{ needs.publish.result == 'success' && needs.deploy.result == 'success' }}
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.deploy.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -1666,6 +1885,7 @@ jobs:
           HEALTH_TIMEOUT: ${{ inputs.health-timeout }}
           PLATFORM: ${{ inputs.platform }}
           RELEASE_VERSION: ${{ needs.publish.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.publish.outputs.commit }}
           IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
           DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -1751,6 +1971,65 @@ jobs:
             if (versionDigest === null) return 'build';
             if (/^sha256:[a-f0-9]{64}$/.test(versionDigest)) return 'verify-reuse';
             throw Error('Invalid existing tag digest');
+          }
+
+          function verifyArtifactRevision(currentSha, artifactRevision, deps = {}) {
+            if (!/^[a-f0-9]{40}$/.test(artifactRevision)) throw Error('Invalid existing image revision');
+            if (artifactRevision === currentSha) return artifactRevision;
+            const git = deps.gitExecFileSync || execFileSync;
+            try {
+              git('git', ['merge-base', '--is-ancestor', artifactRevision, currentSha], {stdio: 'ignore'});
+            } catch {
+              throw Error('Existing image revision is not an ancestor of this commit');
+            }
+            let commits;
+            try {
+              commits = git('git', ['rev-list', '--reverse', `${artifactRevision}..${currentSha}`], {encoding: 'utf8'}).trim().split(/\r?\n/).filter(Boolean);
+            } catch {
+              throw Error('Cannot enumerate existing image recovery commits');
+            }
+            const allowed = (file) => file.startsWith('.github/workflows/') || file === 'scripts/workflow-contract.test.mjs';
+            const normalizePins = (file, contents) => {
+              if (file === 'scripts/workflow-contract.test.mjs') {
+                return contents.replace(/(const pin = ')[a-f0-9]{40}(';)/g, '$1<sha>$2');
+              }
+              return contents.replace(/(devnogi\/ci-workflows\/\.github\/workflows\/(?:spring|node)-(?:ci|prod)\.yml@)[a-f0-9]{40}/g, '$1<sha>');
+            };
+            let changed = false;
+            for (const commit of commits) {
+              let parent;
+              let paths;
+              try {
+                parent = git('git', ['rev-parse', `${commit}^1`], {encoding: 'utf8'}).trim();
+                paths = git('git', ['diff', '--name-only', '-z', '--no-renames', parent, commit, '--'], {encoding: 'utf8'}).split(String.fromCharCode(0)).filter(Boolean);
+              } catch {
+                throw Error('Cannot verify deployment workflow pin changes');
+              }
+              if (paths.length === 0) continue;
+              changed = true;
+              if (paths.some((file) => !allowed(file))) throw Error('Existing image revision differs outside deployment workflow files');
+              for (const file of paths) {
+                let before;
+                let after;
+                try {
+                  before = git('git', ['show', `${parent}:${file}`], {encoding: 'utf8'});
+                  after = git('git', ['show', `${commit}:${file}`], {encoding: 'utf8'});
+                } catch {
+                  throw Error('Existing image recovery cannot add, delete, or rename caller files');
+                }
+                if (before === after || normalizePins(file, before) !== normalizePins(file, after)) {
+                  throw Error('Existing image recovery may change only in-place shared workflow SHAs');
+                }
+              }
+            }
+            if (!changed) throw Error('Existing image recovery contains no workflow pin change');
+            return artifactRevision;
+          }
+
+          function releaseCommit(env) {
+            const commit = required(env, 'RELEASE_COMMIT').trim();
+            if (!/^[a-f0-9]{40}$/.test(commit)) throw Error('Invalid release commit');
+            return commit;
           }
 
           function immutableTagsRequired(info, tags) {
@@ -1861,6 +2140,7 @@ jobs:
             let versionDigest = await readDigest(versionTag);
             const state = collision(versionDigest);
             let digest;
+            let artifactRevision = sha;
             const loginResult = login('docker', ['login', '--username', username, '--password-stdin'], {
               input: env.DOCKERHUB_PUSH_TOKEN,
               stdio: ['pipe', 'ignore', 'pipe'],
@@ -1873,9 +2153,10 @@ jobs:
               const imageVersion = inspect('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.opencontainers.image.version" }}', `${image}:${versionTag}`]);
               const source = inspect('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.opencontainers.image.source" }}', `${image}:${versionTag}`]);
               const repoDigests = JSON.parse(inspect('docker', ['image', 'inspect', '--format', '{{json .RepoDigests}}', `${image}:${versionTag}`]));
-              if (revision !== sha || imageVersion !== release || source !== `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}` || !repoDigests.includes(`${image}@${versionDigest}`)) {
+              if (imageVersion !== release || source !== `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}` || !repoDigests.includes(`${image}@${versionDigest}`)) {
                 throw Error('Existing tag does not match this commit and version');
               }
+              artifactRevision = verifyArtifactRevision(sha, revision, deps);
               digest = versionDigest;
             } else {
               if (await readDigest(versionTag) !== null) throw Error('Tag appeared before publication');
@@ -1904,22 +2185,24 @@ jobs:
               if (versionDigest !== digest) throw Error('Registry digest does not match Buildx output');
             }
 
-            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\ntag=${versionTag}\n`);
-            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${service}\n\nVersion: ${release}\n\nTag: ${versionTag}\n\nCommit: ${sha}\n\nDigest: ${digest}\n`);
+            fs.appendFileSync(env.GITHUB_OUTPUT, `version=${release}\ndigest=${digest}\ntag=${versionTag}\ncommit=${artifactRevision}\n`);
+            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, `Service: ${service}\n\nVersion: ${release}\n\nTag: ${versionTag}\n\nArtifact commit: ${artifactRevision}\n\nWorkflow commit: ${sha}\n\nDigest: ${digest}\n`);
           }
 
           function releaseBody(env) {
             const service = required(env, 'SERVICE_NAME');
             const release = version(required(env, 'RELEASE_VERSION'), false);
-            const sha = required(env, 'GITHUB_SHA');
+            const sha = releaseCommit(env);
             const digest = required(env, 'IMAGE_DIGEST');
             const image = required(env, 'DOCKERHUB_REPOSITORY');
             const tag = `${service}-v${release}`;
+            const workflowSha = required(env, 'GITHUB_SHA');
             if (!/^sha256:[a-f0-9]{64}$/.test(digest)) throw Error('Invalid image digest');
             return [
               `Service: ${service}`,
               `Version: ${release}`,
-              `Commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${sha}`,
+              `Artifact commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${sha}`,
+              `Deployment workflow commit: ${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/commit/${workflowSha}`,
               `Image: ${image}@${digest}`,
               `Docker tag: ${image}:${tag}`,
             ].join('\n\n');
@@ -1933,6 +2216,7 @@ jobs:
             const service = env.SERVICE_NAME;
             const release = version(required(env, 'RELEASE_VERSION'), false);
             const tag = `${service}-v${release}`;
+            const tagCommit = required(env, 'GITHUB_SHA');
             const body = releaseBody(env);
             const api = required(env, 'GITHUB_API_URL');
             if (api !== 'https://api.github.com') throw Error('Invalid GitHub API URL');
@@ -1964,9 +2248,16 @@ jobs:
               if (object.type !== 'commit' || !/^[a-f0-9]{40}$/.test(object.sha)) throw Error('Release tag does not resolve to a commit');
               return object.sha;
             };
+            const verifyTagCommit = async (commit) => {
+              if (commit === tagCommit) return;
+              const comparison = await call(`/compare/${tagCommit}...${commit}`);
+              if (!comparison || comparison.status !== 'ahead' || comparison.merge_base_commit?.sha !== tagCommit) {
+                throw Error('Release tag is not the deployment commit or its descendant');
+              }
+            };
             const verify = async (existing) => {
               const commit = await resolveTag();
-              if (commit !== env.GITHUB_SHA) throw Error('Release tag points to a different commit');
+              await verifyTagCommit(commit);
               if (!existing || existing.tag_name !== tag || existing.name !== tag || existing.body !== body || existing.draft || existing.prerelease) {
                 throw Error('Existing GitHub Release does not match deployed metadata');
               }
@@ -1978,13 +2269,13 @@ jobs:
               existing = await verify(existing);
             } else {
               const commit = await resolveTag();
-              if (commit && commit !== env.GITHUB_SHA) throw Error('Release tag points to a different commit');
+              if (commit) await verifyTagCommit(commit);
               existing = await call('/releases', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                   tag_name: tag,
-                  target_commitish: env.GITHUB_SHA,
+                  target_commitish: 'main',
                   name: tag,
                   body,
                   draft: false,
@@ -2000,7 +2291,7 @@ jobs:
             return existing;
           }
 
-          module.exports = {collision, githubRelease, immutableTagsRequired, publish, releaseBody, resolveGradleVersion, resolveNpmVersion, validateDeploymentSecrets, validateDeploymentSettings, validateInputs, validatePublishSecrets, version};
+          module.exports = {collision, githubRelease, immutableTagsRequired, publish, releaseBody, releaseCommit, resolveGradleVersion, resolveNpmVersion, validateDeploymentSecrets, validateDeploymentSettings, validateInputs, validatePublishSecrets, verifyArtifactRevision, version};
 
           if (require.main === module || process.argv[1] === '-') {
             const mode = process.argv[2];
