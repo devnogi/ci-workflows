@@ -31,7 +31,7 @@ const nodeRun = (mode) => `node - ${mode} <<'RELEASE_SCRIPT'\n${release}\nRELEAS
 const fixedProfile = (kind) => kind === 'node' ? '          SERVICE_PROFILE: react\n' : '';
 
 const deployJob = (integrated, kind) => `  deploy:
-${integrated ? "    needs: publish\n    if: ${{ !cancelled() && needs.publish.result == 'success' }}\n" : ''}    runs-on: ubuntu-latest
+${integrated ? "    needs: publish\n    if: ${{ !cancelled() && needs.publish.result == 'success' }}\n" : ''}    runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 30
     concurrency:
