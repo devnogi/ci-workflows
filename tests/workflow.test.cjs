@@ -114,6 +114,20 @@ test('Node workflow is typed for React and runs the repository quality gates', (
   assert.match(nodeCi, /filter\(x=>!x\[2\]\.startsWith\(":-"\)\)/);
 });
 
+test('deployment jobs pin Ubuntu 24.04 without changing other job runners', () => {
+  for (const workflow of [production, nodeProduction, deployment]) {
+    const start = workflow.indexOf('  deploy:');
+    const release = workflow.indexOf('\n  release:', start);
+    const deployJob = workflow.slice(start, release < 0 ? undefined : release);
+    assert.match(deployJob, /\n    runs-on: ubuntu-24\.04\n/);
+    assert.doesNotMatch(deployJob, /runs-on: ubuntu-latest/);
+  }
+  for (const workflow of [production, nodeProduction]) {
+    assert.match(workflow.slice(0, workflow.indexOf('  deploy:')), /runs-on: ubuntu-latest/);
+    assert.match(workflow.slice(workflow.indexOf('  release:')), /runs-on: ubuntu-latest/);
+  }
+});
+
 test('GitHub Release is created only after successful digest deployment', () => {
   for (const workflow of [production, nodeProduction]) {
     const deployJob = workflow.slice(workflow.indexOf('  deploy:'), workflow.indexOf('  release:'));

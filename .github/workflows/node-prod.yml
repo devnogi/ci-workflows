@@ -1485,7 +1485,7 @@ jobs:
   deploy:
     needs: publish
     if: ${{ !cancelled() && needs.publish.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 30
     concurrency:
