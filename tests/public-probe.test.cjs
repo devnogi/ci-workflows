@@ -8,7 +8,7 @@ const revision = 'a'.repeat(40);
 const origin = 'https://www.memonogi.com';
 const bodies = {
   '/api/health': JSON.stringify({service: 'devnogi-react', revision}),
-  '/': '<h1 class="test">마비노기 경매장·시세·아이템 정보</h1>',
+  '/': '<section class="hero" aria-label="아이템 검색"></section><details><summary class="toggle">주요 기능 보기<svg></svg></summary></details>',
   '/auction-history': '<h1>마비노기 경매장 거래내역·아이템 시세 검색</h1>',
   '/sitemap.xml': `<urlset>${['/', '/auction-history', '/community'].map((x) => `<loc>${origin}${x}</loc>`).join('')}</urlset>`,
   '/robots.txt': `Sitemap: ${origin}/sitemap.xml`,
@@ -34,7 +34,10 @@ test('every public assertion fails closed', async () => {
   for (const changes of [
     {'/api/health': {body: JSON.stringify({service: 'devnogi-react', revision: 'b'.repeat(40)})}},
     {'/api/health': {body: '{'}}, {'/api/health': {body: JSON.stringify({service: 'wrong', revision})}},
-    {'/': {status: 307}}, {'/': {body: '<h1>wrong</h1>'}},
+    {'/': {status: 307}},
+    {'/': {body: '<h1>마비노기 경매장·시세·아이템 정보</h1>'}},
+    {'/': {body: '<section aria-label="아이템 검색"></section>'}},
+    {'/': {body: '<details><summary>주요 기능 보기</summary></details>'}},
     {'/auction-history': {body: '<h1>wrong</h1>'}}, {'/auction-history': {status: 302}},
     {'/sitemap.xml': {status: 404}}, {'/sitemap.xml': {body: `<loc>${origin}/</loc>`}},
     {'/robots.txt': {status: 500}}, {'/robots.txt': {body: 'wrong'}},
