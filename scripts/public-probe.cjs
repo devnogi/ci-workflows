@@ -3,7 +3,8 @@
 const ORIGIN = 'https://www.memonogi.com';
 const routes = [
   ['/api/health', (body, revision) => { const data = JSON.parse(body); return data.service === 'devnogi-react' && data.revision === revision; }],
-  ['/', (body) => /<h1\b[^>]*>\s*마비노기 경매장·시세·아이템 정보\s*<\/h1>/.test(body)],
+  ['/', (body) => /<section\b[^>]*\baria-label="아이템 검색"[^>]*>/.test(body)
+    && /<summary\b[^>]*>[\s\S]*?주요 기능 보기[\s\S]*?<\/summary>/.test(body)],
   ['/auction-history', (body) => /<h1\b[^>]*>\s*마비노기 경매장 거래내역·아이템 시세 검색\s*<\/h1>/.test(body)],
   ['/sitemap.xml', (body) => ['/', '/auction-history', '/community'].every((path) => body.includes(`<loc>${ORIGIN}${path}</loc>`))],
   ['/robots.txt', (body) => body.includes(`Sitemap: ${ORIGIN}/sitemap.xml`)],
