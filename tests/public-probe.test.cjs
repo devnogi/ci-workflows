@@ -30,6 +30,20 @@ test('public verification succeeds and retries transient failure', async () => {
   await probe(fixture());
   await probe(fixture({}, true));
 });
+test('auction verification accepts the compact heading and the previous SEO heading', async () => {
+  for (const heading of ['경매장 거래내역', '마비노기 경매장 거래내역·아이템 시세 검색']) {
+    await probe(fixture({'/auction-history': {body: `<header><h1 class="text-xl">\n ${heading}\n</h1></header>`}}));
+  }
+});
+test('auction verification still rejects missing, unrelated, and error headings', async () => {
+  for (const body of [
+    '<div>경매장 거래내역</div>',
+    '<h2>경매장 거래내역</h2>',
+    '<h1>경매장 현재 매물</h1>',
+    '<h1>경매장 거래내역 오류</h1>',
+    '<h1>문제가 발생했습니다</h1>',
+  ]) await assert.rejects(probe(fixture({'/auction-history': {body}})), /Public verification failed/);
+});
 test('every public assertion fails closed', async () => {
   for (const changes of [
     {'/api/health': {body: JSON.stringify({service: 'devnogi-react', revision: 'b'.repeat(40)})}},

@@ -63,4 +63,6 @@ For React the marker remains in place until the runner directly verifies the pub
 
 ## Development
 
+The auction-history public probe requires an `h1` whose complete text is either `경매장 거래내역` (the compact UI heading) or `마비노기 경매장 거래내역·아이템 시세 검색` (the previous SEO heading). Missing, unrelated, or error headings still fail; HTTP status, health revision, home, sitemap, and robots checks remain required.
+
 The generated production workflows embed the scripts from `scripts/` so they can run in the caller repository without checking out this repository. After changing a script or reusable CI workflow, run `node scripts/generate.cjs`, then `npm run verify`. Also run `actionlint` and Bash syntax checks when available. Docker builds, registry access, SSH, GitHub Release creation, and live service integration require their respective external environments and are not exercised by the offline test suite.
