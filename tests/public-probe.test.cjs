@@ -12,7 +12,7 @@ const index = (paths) => `<?xml version="1.0" encoding="UTF-8"?><sitemapindex xm
 const bodies = {
   '/api/health': JSON.stringify({service: 'devnogi-react', revision}),
   '/': '<section class="hero" aria-label="아이템 검색"></section><details><summary class="toggle">주요 기능 보기<svg></svg></summary></details>',
-  '/auction-history': '<h1>마비노기 경매장 거래내역·아이템 시세 검색</h1>',
+  '/auction-history': '<h1>마비노기 경매장 거래내역·시세</h1>',
   '/sitemap.xml': index(children),
   '/sitemap-static.xml': urlset(['', '/auction-history', '/community']),
   '/sitemap-posts.xml': urlset(['/community/2']),
@@ -84,8 +84,8 @@ test('sitemap requests allow thirty seconds while respecting the overall deadlin
     assert.ok(budgets.every((ms) => ms === 2000));
   } finally { AbortSignal.timeout = original; }
 });
-test('auction verification accepts the compact heading and the previous SEO heading', async () => {
-  for (const heading of ['경매장 거래내역', '마비노기 경매장 거래내역·아이템 시세 검색']) {
+test('auction verification accepts the current SEO heading and both previous headings', async () => {
+  for (const heading of ['마비노기 경매장 거래내역·시세', '경매장 거래내역', '마비노기 경매장 거래내역·아이템 시세 검색']) {
     await probe(fixture({'/auction-history': {body: `<header><h1 class="text-xl">\n ${heading}\n</h1></header>`}}));
   }
 });
@@ -95,6 +95,8 @@ test('auction verification still rejects missing, unrelated, and error headings'
     '<h2>경매장 거래내역</h2>',
     '<h1>경매장 현재 매물</h1>',
     '<h1>경매장 거래내역 오류</h1>',
+    '<h2>마비노기 경매장 거래내역·시세</h2>',
+    '<h1>마비노기 경매장 거래내역·시세 오류</h1>',
     '<h1>문제가 발생했습니다</h1>',
   ]) await assert.rejects(probe(fixture({'/auction-history': {body}})), /Public verification failed/);
 });
