@@ -11,7 +11,7 @@ const urlset = (paths) => `<urlset xmlns="http://www.sitemaps.org/schemas/sitema
 const index = (paths) => `<?xml version="1.0" encoding="UTF-8"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${paths.map((x) => `<sitemap><loc>${origin}${x}</loc></sitemap>`).join('')}</sitemapindex>`;
 const bodies = {
   '/api/health': JSON.stringify({service: 'devnogi-react', revision}),
-  '/': '<section class="hero" aria-label="아이템 검색"></section><details><summary class="toggle">주요 기능 보기<svg></svg></summary></details>',
+  '/': '<section aria-label="메인 광고"><div role="group" aria-label="Hero 이미지 전환"></div></section><form aria-label="메인 통합 검색" role="search"><input aria-label="메인 통합 검색" role="combobox" /></form><div class="content" aria-label="홈 콘텐츠" role="region"></div>',
   '/auction-history': '<h1>마비노기 경매장 거래내역·시세</h1>',
   '/sitemap.xml': index(children),
   '/sitemap-static.xml': urlset(['', '/auction-history', '/community']),
@@ -117,4 +117,17 @@ test('React origin is required and must be the exact approved origin', () => {
   const env = {GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'push', GITHUB_SHA: revision, GITHUB_SERVER_URL: 'https://github.com', GITHUB_REPOSITORY: 'devnogi/devnogi-react', SERVICE_NAME: 'react', SERVICE_PROFILE: 'react', DEPLOYMENT_TARGET: 'prod2', COMPOSE_FILE: 'compose.yml', DOCKERFILE: 'Dockerfile', HEALTH_TIMEOUT: '60', PLATFORM: 'linux/amd64', PUBLIC_ORIGIN: origin};
   assert.doesNotThrow(() => validateInputs(env));
   for (const value of ['', 'http://www.memonogi.com', 'https://other.com', 'https://user@www.memonogi.com', `${origin}:443`, `${origin}/`, `${origin}?x=1`, `${origin}#x`]) assert.throws(() => validateInputs({...env, PUBLIC_ORIGIN: value}));
+});
+
+test('home accepts both search placements without requiring removed feature disclosure', async () => {
+  const body = bodies['/'];
+  await probe(fixture({'/': {body}}));
+  await probe(fixture({'/': {body: body.replace('메인 광고', '아이템 검색') + '<details><summary>주요 기능 보기</summary></details>'}}));
+});
+
+test('home requires search form, input, Hero controls, and content independently', async () => {
+  for (const marker of ['role="search"', 'role="combobox"', 'Hero 이미지 전환', '홈 콘텐츠']) {
+    await assert.rejects(probe(fixture({'/': {body: bodies['/'].replace(marker, 'missing')}})), /Public verification failed/);
+  }
+  await assert.rejects(probe(fixture({'/': {body: bodies['/'].replaceAll('메인 통합 검색', '상단 통합 검색')}})), /Public verification failed/);
 });
