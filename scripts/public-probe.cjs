@@ -47,8 +47,9 @@ async function checkSitemap(body, _revision, read) {
 
 const routes = [
   ['/api/health', (body, revision) => { const data = JSON.parse(body); return data.service === 'devnogi-react' && data.revision === revision; }],
-  ['/', (body) => /<form\b(?=[^>]*\brole="search")(?=[^>]*\baria-label="메인 통합 검색")[^>]*>/.test(body)
-    && /<input\b(?=[^>]*\brole="combobox")(?=[^>]*\baria-label="메인 통합 검색")[^>]*>/.test(body)
+  ['/', (body) => ['메인 통합 검색', '상단 통합 검색'].some((label) =>
+    new RegExp(`<form\\b(?=[^>]*\\brole="search")(?=[^>]*\\baria-label="${label}")[^>]*>`).test(body)
+    && new RegExp(`<input\\b(?=[^>]*\\brole="combobox")(?=[^>]*\\baria-label="${label}")[^>]*>`).test(body))
     && /<div\b(?=[^>]*\brole="group")(?=[^>]*\baria-label="Hero 이미지 전환")[^>]*>/.test(body)
     && /<div\b(?=[^>]*\brole="region")(?=[^>]*\baria-label="홈 콘텐츠")[^>]*>/.test(body)],
   ['/auction-history', (body) => /<h1\b[^>]*>\s*(?:마비노기 경매장 거래내역·시세|경매장 거래내역|마비노기 경매장 거래내역·아이템 시세 검색)\s*<\/h1>/.test(body)],

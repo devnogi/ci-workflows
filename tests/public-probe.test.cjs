@@ -126,8 +126,21 @@ test('home accepts both search placements without requiring removed feature disc
 });
 
 test('home requires search form, input, Hero controls, and content independently', async () => {
-  for (const marker of ['role="search"', 'role="combobox"', 'Hero 이미지 전환', '홈 콘텐츠']) {
-    await assert.rejects(probe(fixture({'/': {body: bodies['/'].replace(marker, 'missing')}})), /Public verification failed/);
+  for (const label of ['메인 통합 검색', '상단 통합 검색']) {
+    const body = bodies['/'].replaceAll('메인 통합 검색', label);
+    await probe(fixture({'/': {body}}));
+    for (const marker of ['role="search"', 'role="combobox"', 'Hero 이미지 전환', '홈 콘텐츠']) {
+      await assert.rejects(probe(fixture({'/': {body: body.replace(marker, 'missing')}})), /Public verification failed/);
+    }
   }
-  await assert.rejects(probe(fixture({'/': {body: bodies['/'].replaceAll('메인 통합 검색', '상단 통합 검색')}})), /Public verification failed/);
+});
+
+test('home rejects blank, missing, unsupported, and mismatched search labels', async () => {
+  for (const body of [
+    '',
+    bodies['/'].replace(/<form\b[\s\S]*?<\/form>/, ''),
+    bodies['/'].replaceAll('메인 통합 검색', '다른 통합 검색'),
+    bodies['/'].replace('메인 통합 검색', '상단 통합 검색'),
+    bodies['/'].replaceAll('메인 통합 검색', '상단 통합 검색').replace('상단 통합 검색', '메인 통합 검색'),
+  ]) await assert.rejects(probe(fixture({'/': {body}})), /Public verification failed/);
 });
